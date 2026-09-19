@@ -759,10 +759,10 @@ def admin_system_diagnostics(admin: User = Depends(require_admin), db: Session =
 
     vectors_count = 0
     try:
-        test_path = str(INDEX_DIR / "test_mini")
+        test_path = str(INDEX_DIR / "test_mini.faiss")
         if os.path.exists(test_path):
             import faiss
-            idx = faiss.read_index(os.path.join(test_path, "index.faiss"))
+            idx = faiss.read_index(test_path)
             vectors_count = idx.ntotal
     except Exception:
         pass
