@@ -18,9 +18,7 @@ env/
 *.sqlite3
 
 # FAISS indexes (too large for git)
-indexes/
-
-# IDE
+# indexes/
 .vscode/
 .idea/
 *.swp
