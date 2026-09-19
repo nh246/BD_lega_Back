@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Environment variables (SECRETS!)
+.env
+
+# Database
+*.db
+*.sqlite3
+
+# FAISS indexes (too large for git)
+indexes/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Uploads
+uploads/
