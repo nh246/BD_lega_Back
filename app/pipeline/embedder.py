@@ -17,8 +17,7 @@ import numpy as np
 from langchain_core.documents import Document
 from app.config import settings, INDEX_DIR
 
-from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
-
+from fastembed import TextEmbedding
 
 class LightweightEmbeddings:
     """Wrapper around FastEmbed to match expected interface."""
@@ -26,13 +25,16 @@ class LightweightEmbeddings:
     def __init__(self):
         # This downloads the ~90MB ONNX model on first boot and caches it.
         # It runs in <150MB of RAM using ONNX Runtime.
-        self.model = FastEmbedEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        self.model = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
     
     def embed_query(self, text: str) -> list[float]:
-        return self.model.embed_query(text)
+        # query_embed returns a generator yielding one array
+        vector = next(self.model.query_embed(text))
+        return [float(x) for x in vector]
     
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return self.model.embed_documents(texts)
+        # embed returns a generator of arrays
+        return [[float(x) for x in vector] for vector in self.model.embed(texts)]
 
 
 def get_embeddings_model():
