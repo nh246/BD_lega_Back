@@ -1,9 +1,9 @@
 """
-Embedder — Lightweight query-time embeddings using HuggingFace Inference API.
+Embedder — Lightweight local embeddings using FastEmbed.
 
 For indexing (Colab), we use local sentence-transformers.
-For serving (Render), we use the free HuggingFace Inference API 
-to avoid loading 500MB+ of PyTorch into memory.
+For serving (Render), we use FastEmbed which uses ONNX Runtime 
+to run the exact same model with <150MB of RAM, avoiding PyTorch overhead.
 """
 
 import os
@@ -11,59 +11,34 @@ import pickle
 import time
 import json
 from pathlib import Path
-from urllib.request import Request, urlopen
 
 import faiss
 import numpy as np
 from langchain_core.documents import Document
 from app.config import settings, INDEX_DIR
 
-# HuggingFace Inference API (free, no key needed for public models)
-HF_INFERENCE_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
-
-
-import requests
-
-def embed_query_via_api(text: str) -> list[float]:
-    """Embed a single query using HuggingFace free Inference API.
-    
-    This avoids loading sentence-transformers + PyTorch locally,
-    saving ~500MB of RAM on Render's free tier.
-    """
-    payload = {"inputs": text, "options": {"wait_for_model": True}}
-    headers = {"Content-Type": "application/json"}
-    
-    try:
-        response = requests.post(HF_INFERENCE_URL, json=payload, headers=headers, timeout=30)
-        response.raise_for_status()
-        result = response.json()
-        
-        # The API returns a list of floats for a single string input
-        if isinstance(result, list) and isinstance(result[0], float):
-            return result
-        elif isinstance(result, list) and isinstance(result[0], list):
-            return result[0]
-        return result
-    except Exception as e:
-        print(f"HF API embedding failed: {e}")
-        # Fallback empty vector (will yield bad search results but won't crash)
-        return [0.0] * 384
+from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
 
 
 class LightweightEmbeddings:
-    """Drop-in replacement for HuggingFaceEmbeddings that uses the Inference API."""
+    """Wrapper around FastEmbed to match expected interface."""
+    
+    def __init__(self):
+        # This downloads the ~90MB ONNX model on first boot and caches it.
+        # It runs in <150MB of RAM using ONNX Runtime.
+        self.model = FastEmbedEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     
     def embed_query(self, text: str) -> list[float]:
-        return embed_query_via_api(text)
+        return self.model.embed_query(text)
     
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return [embed_query_via_api(t) for t in texts]
+        return self.model.embed_documents(texts)
 
 
 def get_embeddings_model():
-    """Return a lightweight embeddings model that uses HF Inference API.
+    """Return a lightweight embeddings model that uses FastEmbed.
     
-    No local model loading — perfect for memory-constrained servers.
+    No PyTorch required — perfect for memory-constrained servers.
     """
     return LightweightEmbeddings()
 

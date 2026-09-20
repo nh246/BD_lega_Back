@@ -6,6 +6,7 @@ langchain==0.3.0
 langchain-community==0.3.0
 langchain-google-genai==2.0.0
 faiss-cpu
+fastembed
 requests
 rank-bm25==0.2.2
 pypdf==4.3.0
