@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     GOOGLE_API_KEY: str = ""
 
     # --- Embedding ---
-    EMBEDDING_MODEL: str = "models/gemini-embedding-001"
+    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 
     # --- Generation ---
     GENERATION_MODEL: str = "gemini-3.6-flash"

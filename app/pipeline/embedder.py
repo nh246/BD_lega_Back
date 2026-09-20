@@ -13,44 +13,33 @@ from pathlib import Path
 import faiss
 import numpy as np
 from langchain_core.documents import Document
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from app.config import settings, INDEX_DIR
 
-
-def get_embeddings_model() -> GoogleGenerativeAIEmbeddings:
-    """Create the Google embeddings model instance.
+def get_embeddings_model() -> HuggingFaceEmbeddings:
+    """Create the HuggingFace embeddings model instance.
     
-    Uses text-embedding-004 which:
-    - Supports 100+ languages including Bangla
-    - 768 dimensions
-    - Free tier: 1,500 requests/minute
-    - No local model download needed
+    Uses all-MiniLM-L6-v2 which:
+    - 384 dimensions
+    - Runs entirely locally (no API limits)
     """
-    if not settings.GOOGLE_API_KEY or settings.GOOGLE_API_KEY == "your-api-key-here":
-        raise ValueError(
-            "GOOGLE_API_KEY not set! Add it to backend/.env file.\n"
-            "Get your key from: https://ai.google.dev/"
-        )
-    
-    return GoogleGenerativeAIEmbeddings(
-        model=settings.EMBEDDING_MODEL,
-        google_api_key=settings.GOOGLE_API_KEY,
+    return HuggingFaceEmbeddings(
+        model_name=settings.EMBEDDING_MODEL,
+        model_kwargs={'device': 'cpu'},
+        encode_kwargs={'normalize_embeddings': True}
     )
 
 
 def embed_documents(
     chunks: list[Document],
-    batch_size: int = 50,
+    batch_size: int = 256,
     verbose: bool = True,
 ) -> tuple[np.ndarray, list[Document]]:
-    """Embed a list of document chunks using Google API.
-    
-    Includes rate limiting and retry logic for free tier (100 req/min).
+    """Embed a list of document chunks using a local model.
     
     Args:
         chunks: List of Document objects to embed
-        batch_size: Number of texts per API call (50 to stay under limits)
+        batch_size: Not strictly needed for local HF but kept for API compatibility
         verbose: Print progress
         
     Returns:
@@ -58,40 +47,12 @@ def embed_documents(
         shape (n_chunks, embedding_dim)
     """
     embeddings_model = get_embeddings_model()
-    
-    all_embeddings = []
     texts = [chunk.page_content for chunk in chunks]
-    total_batches = (len(texts) + batch_size - 1) // batch_size
     
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i:i + batch_size]
-        batch_num = i // batch_size + 1
+    if verbose:
+        print(f"  Embedding {len(texts)} chunks locally (this may take a few minutes)...")
         
-        # Retry with exponential backoff on rate limit errors
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                batch_embeddings = embeddings_model.embed_documents(batch)
-                all_embeddings.extend(batch_embeddings)
-                break
-            except Exception as e:
-                error_msg = str(e).lower()
-                if "429" in str(e) or "resource_exhausted" in error_msg or "quota" in error_msg:
-                    wait_time = 45 * (attempt + 1)  # 45s, 90s, 135s...
-                    if verbose:
-                        print(f"  Rate limited at batch {batch_num}. Waiting {wait_time}s...")
-                    time.sleep(wait_time)
-                else:
-                    raise
-        else:
-            raise RuntimeError(f"Failed after {max_retries} retries at batch {batch_num}")
-        
-        if verbose:
-            print(f"  Batch {batch_num}/{total_batches}: embedded {min(i + batch_size, len(texts))}/{len(texts)} chunks")
-        
-        # Rate limit: sleep between batches to avoid hitting 100 req/min
-        if i + batch_size < len(texts):
-            time.sleep(2)
+    all_embeddings = embeddings_model.embed_documents(texts)
     
     if verbose:
         print(f"  Embedding complete: {len(all_embeddings)} vectors of dim {len(all_embeddings[0])}")
