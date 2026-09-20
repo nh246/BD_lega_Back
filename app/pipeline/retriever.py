@@ -38,8 +38,12 @@ class FAISSRetriever(BaseRetriever):
         faiss.normalize_L2(query_array)
         
         # Search index
-        scores, indices = self.index.search(query_array, self.k)
-        
+        try:
+            scores, indices = self.index.search(query_array, self.k)
+        except AssertionError as e:
+            # We catch the FAISS assertion error to dump the dimension info!
+            raise RuntimeError(f"FAISS Dimension mismatch! Index dimension: {self.index.d}. Query dimension: {query_array.shape}. Exception: {e}")
+            
         results = []
         for idx in indices[0]:
             if idx < len(self.chunks) and idx >= 0:
