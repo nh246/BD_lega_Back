@@ -16,6 +16,8 @@ from app.routers.lawyers import router as lawyer_router
 from app.routers.firms import router as firm_router
 from app.routers.schedules import router as schedule_router
 from app.routers.bookings import router as booking_router
+from app.routers.chat import router as chat_router
+from app.routers.llm_config import router as llm_config_router
 
 app = FastAPI(title="BD Legal Guide AI API")
 
@@ -33,6 +35,8 @@ app.include_router(lawyer_router)
 app.include_router(firm_router)
 app.include_router(schedule_router)
 app.include_router(booking_router)
+app.include_router(chat_router)
+app.include_router(llm_config_router)
 
 
 @app.on_event("startup")

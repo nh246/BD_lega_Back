@@ -254,3 +254,146 @@ class BookingUpdate(BaseModel):
     status: str
     meet_link: Optional[str] = None
 
+
+# --- Module 6: Chat & LLM Config Schemas ---
+
+class ChatMessageCreate(BaseModel):
+    session_id: Optional[str] = None
+    content: Optional[str] = None
+    message: Optional[str] = None
+    mode: Optional[str] = "standard"
+
+    @model_validator(mode="after")
+    def populate_content(self):
+        if not self.content and self.message:
+            self.content = self.message
+        if not self.content:
+            raise ValueError("Message content is required")
+        return self
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    provider: str
+    model: str
+    disclaimer: str
+    session_id: Optional[str] = None
+    id: Optional[str] = None
+    content: Optional[str] = None
+    response: Optional[str] = None
+    message: Optional[str] = None
+
+    @model_validator(mode="after")
+    def populate_aliases(self):
+        if not self.content:
+            self.content = self.reply
+        if not self.response:
+            self.response = self.reply
+        if not self.message:
+            self.message = self.reply
+        return self
+
+
+class LlmConfigUpdate(BaseModel):
+    provider: str = "gemini"
+    model_name: Optional[str] = None
+    model: Optional[str] = None
+    temperature: float = 0.7
+    max_tokens: int = 2048
+    system_prompt: Optional[str] = ""
+    disclaimer: Optional[str] = ""
+    is_active: bool = True
+
+    @model_validator(mode="after")
+    def populate_model_name(self):
+        if not self.model_name and self.model:
+            self.model_name = self.model
+        if not self.model_name:
+            self.model_name = "gemini-1.5-flash"
+        return self
+
+
+class LlmConfigResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    provider: str
+    model_name: str
+    model: Optional[str] = None
+    temperature: float
+    max_tokens: int
+    system_prompt: Optional[str] = None
+    disclaimer: Optional[str] = None
+    is_active: bool
+    created_at: str
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def serialize_id(cls, v):
+        if isinstance(v, uuid.UUID):
+            return str(v)
+        return str(v) if v is not None else ""
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def serialize_datetime(cls, v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v) if v is not None else ""
+
+    @model_validator(mode="after")
+    def set_model_alias(self):
+        if not self.model:
+            self.model = self.model_name
+        return self
+
+
+class ChatSessionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    user_id: str
+    title: Optional[str] = "Legal Consultation"
+    created_at: str
+
+    @field_validator("id", "user_id", mode="before")
+    @classmethod
+    def serialize_uuid(cls, v):
+        if isinstance(v, uuid.UUID):
+            return str(v)
+        return str(v) if v is not None else ""
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def serialize_datetime(cls, v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v) if v is not None else ""
+
+
+class ChatMessageResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    session_id: str
+    role: str
+    content: str
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    created_at: str
+
+    @field_validator("id", "session_id", mode="before")
+    @classmethod
+    def serialize_uuid(cls, v):
+        if isinstance(v, uuid.UUID):
+            return str(v)
+        return str(v) if v is not None else ""
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def serialize_datetime(cls, v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v) if v is not None else ""
+
+

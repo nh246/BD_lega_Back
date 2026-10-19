@@ -7,3 +7,4 @@ python-dotenv
 pydantic
 httpx
 python-multipart
+google-generativeai
