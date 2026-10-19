@@ -397,3 +397,124 @@ class ChatMessageResponse(BaseModel):
         return str(v) if v is not None else ""
 
 
+# --- Module 7: Payments & Subscriptions Schemas ---
+
+class PlanResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    code: str
+    name: str
+    price_monthly: float
+    features: List[str]
+    price: Optional[Any] = None
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def serialize_id(cls, v):
+        if isinstance(v, uuid.UUID):
+            return str(v)
+        return str(v) if v is not None else ""
+
+    @model_validator(mode="after")
+    def populate_price(self):
+        if self.price is None:
+            self.price = self.price_monthly
+        return self
+
+
+class SubscriptionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    user_id: str
+    plan_code: str
+    status: str
+    started_at: str
+    expires_at: Optional[str] = None
+
+    @field_validator("id", "user_id", mode="before")
+    @classmethod
+    def serialize_uuid(cls, v):
+        if isinstance(v, uuid.UUID):
+            return str(v)
+        return str(v) if v is not None else ""
+
+    @field_validator("started_at", "expires_at", mode="before")
+    @classmethod
+    def serialize_datetime(cls, v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v) if v is not None else None
+
+    @model_validator(mode="before")
+    @classmethod
+    def extract_plan_code(cls, data: Any):
+        if isinstance(data, dict):
+            return data
+        plan_code = getattr(data, "plan_code", None)
+        if not plan_code and hasattr(data, "plan") and data.plan:
+            plan_code = getattr(data.plan, "code", None)
+        started_at = getattr(data, "started_at", None)
+        expires_at = getattr(data, "expires_at", None)
+        return {
+            "id": str(getattr(data, "id", "")),
+            "user_id": str(getattr(data, "user_id", "")),
+            "plan_code": plan_code or "",
+            "status": getattr(data, "status", "pending"),
+            "started_at": started_at.isoformat() if hasattr(started_at, "isoformat") else str(started_at or ""),
+            "expires_at": expires_at.isoformat() if hasattr(expires_at, "isoformat") else (str(expires_at) if expires_at else None),
+        }
+
+
+class PaymentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    type: str
+    amount: float
+    provider: str
+    status: str
+    created_at: str
+    user_email: Optional[str] = None
+    client_name: Optional[str] = None
+    user_name: Optional[str] = None
+    transaction_id: Optional[str] = None
+    method: Optional[str] = None
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def serialize_id(cls, v):
+        if isinstance(v, uuid.UUID):
+            return str(v)
+        return str(v) if v is not None else ""
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def serialize_datetime(cls, v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v) if v is not None else ""
+
+    @model_validator(mode="after")
+    def populate_aliases(self):
+        if not self.transaction_id:
+            self.transaction_id = self.id
+        if not self.method:
+            self.method = self.provider
+        return self
+
+
+class CheckoutRequest(BaseModel):
+    plan_code: str
+    provider: Optional[str] = None
+
+
+class CheckoutResponse(BaseModel):
+    checkout_url: str
+    status: str
+    subscription_id: Optional[str] = None
+    payment_id: Optional[str] = None
+
+
+
