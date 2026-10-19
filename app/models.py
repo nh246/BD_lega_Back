@@ -37,7 +37,7 @@ class User(Base):
 
     # Relationships
     lawyer_profile = relationship("LawyerProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
-    bookings = relationship("Booking", back_populates="user", foreign_keys="Booking.user_id")
+    bookings = relationship("Booking", back_populates="user", foreign_keys="Booking.user_id", cascade="all, delete-orphan")
     chat_sessions = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")
     subscriptions = relationship("Subscription", back_populates="user", cascade="all, delete-orphan")
     audit_logs = relationship("AuditLog", back_populates="actor", foreign_keys="AuditLog.actor_id")

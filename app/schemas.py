@@ -5,7 +5,7 @@ Authentication, Users, Moderators, Audit Logs, Lawyers & Law Firms.
 
 from typing import Any, Dict, List, Optional
 import uuid
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 
 class UserCreate(BaseModel):
@@ -137,3 +137,120 @@ class FirmUpdate(BaseModel):
     phone: Optional[str] = None
     address: Optional[str] = None
     status: Optional[str] = None
+
+
+# --- Module 5: Schedules & Bookings Schemas ---
+
+class ScheduleResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    lawyer_id: str
+    date: str
+    start_time: str
+    end_time: str
+    is_booked: bool
+
+    @field_validator("id", "lawyer_id", mode="before")
+    @classmethod
+    def serialize_uuid(cls, v):
+        if v is None:
+            return ""
+        return str(v)
+
+
+class ScheduleCreate(BaseModel):
+    date: str
+    start_time: str
+    end_time: str
+
+
+class BookingResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    user_id: str
+    lawyer_id: str
+    schedule_id: str
+    status: str
+    created_at: str
+    lawyer_name: Optional[str] = None
+    user_name: Optional[str] = None
+    meet_link: Optional[str] = None
+    scheduled_time: Optional[str] = None
+    date: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+
+    @field_validator("id", "user_id", "lawyer_id", "schedule_id", mode="before")
+    @classmethod
+    def serialize_uuid(cls, v):
+        if v is None:
+            return ""
+        return str(v)
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def serialize_datetime(cls, v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v) if v is not None else ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def extract_relations(cls, data: Any):
+        if isinstance(data, dict):
+            return data
+
+        lawyer_name = None
+        user_name = None
+        date_val = getattr(data, "date", None)
+        start_time_val = getattr(data, "start_time", None)
+        end_time_val = getattr(data, "end_time", None)
+
+        if hasattr(data, "lawyer") and data.lawyer:
+            lawyer_name = getattr(data.lawyer, "name", None)
+        if hasattr(data, "user") and data.user:
+            user_name = getattr(data.user, "full_name", None)
+        if hasattr(data, "schedule") and data.schedule:
+            date_val = getattr(data.schedule, "date", None)
+            start_time_val = getattr(data.schedule, "start_time", None)
+            end_time_val = getattr(data.schedule, "end_time", None)
+
+        created_at_val = getattr(data, "created_at", "")
+        if hasattr(created_at_val, "isoformat"):
+            created_at_val = created_at_val.isoformat()
+        else:
+            created_at_val = str(created_at_val) if created_at_val is not None else ""
+
+        scheduled_time = (
+            f"{date_val} {start_time_val}".strip()
+            if (date_val or start_time_val)
+            else None
+        )
+
+        return {
+            "id": str(getattr(data, "id", "")),
+            "user_id": str(getattr(data, "user_id", "")),
+            "lawyer_id": str(getattr(data, "lawyer_id", "")),
+            "schedule_id": str(getattr(data, "schedule_id", "")),
+            "status": str(getattr(data, "status", "pending")),
+            "created_at": created_at_val,
+            "lawyer_name": lawyer_name or getattr(data, "lawyer_name", None),
+            "user_name": user_name or getattr(data, "user_name", None),
+            "meet_link": getattr(data, "meet_link", None),
+            "scheduled_time": scheduled_time,
+            "date": date_val,
+            "start_time": start_time_val,
+            "end_time": end_time_val,
+        }
+
+
+class BookingCreate(BaseModel):
+    schedule_id: str
+
+
+class BookingUpdate(BaseModel):
+    status: str
+    meet_link: Optional[str] = None
+

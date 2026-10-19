@@ -1,0 +1,399 @@
+"""
+Bookings router: Client booking creation, client's bookings listing,
+and lawyer booking management (confirmation/cancellation).
+"""
+
+from typing import List
+import uuid
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session, joinedload
+
+from app.core.database import get_db
+from app.core.deps import get_current_user, require_role
+from app.models import Booking, LawyerProfile, Schedule, User
+from app.schemas import BookingCreate, BookingResponse, BookingUpdate
+from app.audit import log_audit
+
+router = APIRouter(prefix="/api", tags=["Bookings"])
+
+
+def _parse_uuid(id_str: str, entity_name: str = "Booking") -> uuid.UUID:
+    """Helper to safely parse UUID strings, raising 404 on malformed values."""
+    try:
+        return uuid.UUID(id_str)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"{entity_name} not found",
+        )
+
+
+@router.post("/bookings", response_model=BookingResponse, status_code=status.HTTP_201_CREATED)
+def create_booking(
+    booking_in: BookingCreate,
+    current_user: User = Depends(require_role("user")),
+    db: Session = Depends(get_db),
+):
+    """
+    Client booking creation.
+    Depends on require_role("user").
+    CRITICAL: Check if schedule exists and is_booked == False.
+    If yes, create booking with status='pending', set schedule is_booked = True,
+    and log audit ('booking_created'). Return 201.
+    If already booked, return 400.
+    """
+    schedule_uuid = _parse_uuid(booking_in.schedule_id, "Schedule slot")
+
+    schedule = (
+        db.query(Schedule)
+        .options(joinedload(Schedule.lawyer))
+        .filter(Schedule.id == schedule_uuid)
+        .first()
+    )
+    if not schedule:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Schedule slot not found",
+        )
+
+    if schedule.is_booked:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Schedule slot is already booked",
+        )
+
+    # Mark slot as booked
+    schedule.is_booked = True
+
+    # Create pending booking
+    new_booking = Booking(
+        user_id=current_user.id,
+        lawyer_id=schedule.lawyer_id,
+        schedule_id=schedule.id,
+        status="pending",
+    )
+    db.add(new_booking)
+    db.commit()
+    db.refresh(new_booking)
+
+    # Log audit entry
+    log_audit(
+        db=db,
+        actor_id=current_user.id,
+        action="booking_created",
+        target_type="booking",
+        target_id=str(new_booking.id),
+        details={
+            "schedule_id": str(schedule.id),
+            "lawyer_id": str(schedule.lawyer_id),
+            "date": schedule.date,
+            "start_time": schedule.start_time,
+            "end_time": schedule.end_time,
+        },
+    )
+
+    # Re-fetch with relationships loaded for complete response serialization
+    booking_loaded = (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.user),
+            joinedload(Booking.lawyer),
+            joinedload(Booking.schedule),
+        )
+        .filter(Booking.id == new_booking.id)
+        .first()
+    )
+
+    return booking_loaded
+
+
+@router.get("/bookings/mine", response_model=List[BookingResponse])
+def get_my_bookings(
+    current_user: User = Depends(require_role("user")),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns all bookings for the currently authenticated user, joined with lawyer name.
+    """
+    bookings = (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.user),
+            joinedload(Booking.lawyer),
+            joinedload(Booking.schedule),
+        )
+        .filter(Booking.user_id == current_user.id)
+        .order_by(Booking.created_at.desc())
+        .all()
+    )
+    return bookings
+
+
+@router.get("/lawyer/bookings", response_model=List[BookingResponse])
+@router.get("/lawyer/requests", response_model=List[BookingResponse])
+def get_lawyer_bookings(
+    current_user: User = Depends(require_role("lawyer")),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns all bookings/requests where the schedule belongs to the current lawyer,
+    joined with user name. Supports both /lawyer/bookings and /lawyer/requests.
+    """
+    profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User does not have an associated lawyer profile",
+        )
+
+    bookings = (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.user),
+            joinedload(Booking.lawyer),
+            joinedload(Booking.schedule),
+        )
+        .filter(Booking.lawyer_id == profile.id)
+        .order_by(Booking.created_at.desc())
+        .all()
+    )
+    return bookings
+
+
+@router.get("/lawyer/requests/{booking_id}", response_model=BookingResponse)
+def get_lawyer_request_detail(
+    booking_id: str,
+    current_user: User = Depends(require_role("lawyer")),
+    db: Session = Depends(get_db),
+):
+    """
+    Lawyer single booking/request detail endpoint.
+    """
+    profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User does not have an associated lawyer profile",
+        )
+
+    booking_uuid = _parse_uuid(booking_id, "Booking")
+    booking = (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.user),
+            joinedload(Booking.lawyer),
+            joinedload(Booking.schedule),
+        )
+        .filter(Booking.id == booking_uuid)
+        .first()
+    )
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+
+    if booking.lawyer_id != profile.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to view this booking",
+        )
+
+    return booking
+
+
+@router.get("/bookings/{booking_id}", response_model=BookingResponse)
+def get_booking_detail(
+    booking_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Single booking detail endpoint for client or assigned lawyer or admin.
+    """
+    booking_uuid = _parse_uuid(booking_id, "Booking")
+    booking = (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.user),
+            joinedload(Booking.lawyer),
+            joinedload(Booking.schedule),
+        )
+        .filter(Booking.id == booking_uuid)
+        .first()
+    )
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+
+    # Ensure access rights
+    is_owner = booking.user_id == current_user.id
+    is_lawyer = (
+        current_user.lawyer_profile
+        and booking.lawyer_id == current_user.lawyer_profile.id
+    )
+    is_staff = current_user.role in ["admin", "moderator"]
+
+    if not (is_owner or is_lawyer or is_staff):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied to this booking",
+        )
+
+    return booking
+
+
+@router.patch("/lawyer/bookings/{booking_id}", response_model=BookingResponse)
+@router.patch("/lawyer/requests/{booking_id}", response_model=BookingResponse)
+def update_lawyer_booking(
+    booking_id: str,
+    update_data: BookingUpdate,
+    current_user: User = Depends(require_role("lawyer")),
+    db: Session = Depends(get_db),
+):
+    """
+    Lawyer booking update endpoint.
+    Takes BookingUpdate with status ('confirmed' or 'cancelled'/'declined').
+    CRITICAL: Verify the booking belongs to the current lawyer.
+    If status is changed to 'cancelled', set associated schedule is_booked = False.
+    Log audit ('booking_confirmed' or 'booking_cancelled').
+    """
+    profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User does not have an associated lawyer profile",
+        )
+
+    booking_uuid = _parse_uuid(booking_id, "Booking")
+    booking = (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.schedule),
+            joinedload(Booking.user),
+            joinedload(Booking.lawyer),
+        )
+        .filter(Booking.id == booking_uuid)
+        .first()
+    )
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+
+    # CRITICAL: Verify the booking belongs to the current lawyer
+    if booking.lawyer_id != profile.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to modify this booking",
+        )
+
+    target_status = update_data.status.strip().lower()
+    if target_status == "declined":
+        target_status = "cancelled"
+
+    if target_status not in ["confirmed", "cancelled"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid status. Must be 'confirmed' or 'cancelled'",
+        )
+
+    old_status = booking.status
+    booking.status = target_status
+
+    # If status changed to cancelled, reopen the schedule slot
+    if target_status == "cancelled" and booking.schedule:
+        booking.schedule.is_booked = False
+
+    db.commit()
+    db.refresh(booking)
+
+    # Audit logging
+    audit_action = "booking_confirmed" if target_status == "confirmed" else "booking_cancelled"
+    log_audit(
+        db=db,
+        actor_id=current_user.id,
+        action=audit_action,
+        target_type="booking",
+        target_id=str(booking.id),
+        details={
+            "old_status": old_status,
+            "new_status": target_status,
+            "schedule_id": str(booking.schedule_id),
+            "lawyer_id": str(booking.lawyer_id),
+        },
+    )
+
+    return booking
+
+
+@router.patch("/bookings/{booking_id}", response_model=BookingResponse)
+def client_cancel_booking(
+    booking_id: str,
+    update_data: BookingUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Allows a client to cancel their own booking, reopening the associated schedule slot.
+    """
+    booking_uuid = _parse_uuid(booking_id, "Booking")
+    booking = (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.schedule),
+            joinedload(Booking.user),
+            joinedload(Booking.lawyer),
+        )
+        .filter(Booking.id == booking_uuid)
+        .first()
+    )
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+
+    # Verify authorization: user is the client who booked it, or admin
+    is_owner = booking.user_id == current_user.id
+    is_admin = current_user.role == "admin"
+    if not (is_owner or is_admin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to modify this booking",
+        )
+
+    target_status = update_data.status.strip().lower()
+    if target_status not in ["cancelled", "declined"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Clients can only cancel bookings with status 'cancelled'",
+        )
+
+    old_status = booking.status
+    booking.status = "cancelled"
+
+    if booking.schedule:
+        booking.schedule.is_booked = False
+
+    db.commit()
+    db.refresh(booking)
+
+    log_audit(
+        db=db,
+        actor_id=current_user.id,
+        action="booking_cancelled",
+        target_type="booking",
+        target_id=str(booking.id),
+        details={
+            "old_status": old_status,
+            "new_status": "cancelled",
+            "cancelled_by": "client" if is_owner else "admin",
+            "schedule_id": str(booking.schedule_id),
+        },
+    )
+
+    return booking
