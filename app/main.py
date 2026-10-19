@@ -10,6 +10,10 @@ from sqlalchemy import text
 
 from app.core.database import Base, engine, get_db
 import app.models  # Ensure all 12 models are registered with Base.metadata
+from app.routers.auth import router as auth_router
+from app.routers.admin import router as admin_router
+from app.routers.lawyers import router as lawyer_router
+from app.routers.firms import router as firm_router
 
 app = FastAPI(title="BD Legal Guide AI API")
 
@@ -20,6 +24,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(auth_router)
+app.include_router(admin_router)
+app.include_router(lawyer_router)
+app.include_router(firm_router)
 
 
 @app.on_event("startup")
