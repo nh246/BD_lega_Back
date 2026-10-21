@@ -147,3 +147,61 @@ def update_lawyer_verification(
     db.commit()
     db.refresh(profile)
     return profile
+
+
+@router.get("/lawyer/me", response_model=LawyerResponse)
+def get_my_lawyer_profile(
+    current_user: User = Depends(require_role("lawyer")),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns the currently logged-in lawyer's profile, including verification status.
+    """
+    profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+    if not profile:
+        # Create profile on-the-fly if missing
+        profile = LawyerProfile(
+            id=uuid.uuid4(),
+            user_id=current_user.id,
+            name=current_user.full_name or "Advocate",
+            verification_status="pending",
+            verification_paid=False,
+        )
+        db.add(profile)
+        db.commit()
+        db.refresh(profile)
+    return profile
+
+
+@router.put("/lawyer/me", response_model=LawyerResponse)
+def update_my_lawyer_profile(
+    update_data: LawyerUpdate,
+    current_user: User = Depends(require_role("lawyer")),
+    db: Session = Depends(get_db),
+):
+    """
+    Updates the authenticated lawyer's profile details.
+    """
+    profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+    if not profile:
+        profile = LawyerProfile(
+            id=uuid.uuid4(),
+            user_id=current_user.id,
+            name=current_user.full_name or "Advocate",
+            verification_status="pending",
+            verification_paid=False,
+        )
+        db.add(profile)
+
+    if update_data.name is not None:
+        profile.name = update_data.name.strip()
+    if update_data.district is not None:
+        profile.district = update_data.district.strip()
+    if update_data.specialization is not None:
+        profile.specialization = update_data.specialization.strip()
+    if update_data.phone is not None:
+        profile.phone = update_data.phone.strip()
+
+    db.commit()
+    db.refresh(profile)
+    return profile

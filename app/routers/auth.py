@@ -12,13 +12,28 @@ from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.core.security import get_password_hash, verify_password, create_access_token
 from app.models import User, LawyerProfile
-from app.schemas import UserCreate, UserLogin, UserResponse, Token
+from app.schemas import UserCreate, UserLogin, UserResponse, Token, AuthResponse
 from app.audit import log_audit
+from app.core.plans import get_user_plan
 
 router = APIRouter(prefix="/api/auth", tags=["Auth"])
 
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+def _make_user_response(db: Session, user: User) -> UserResponse:
+    user_plan = get_user_plan(db, user)
+    return UserResponse(
+        id=str(user.id),
+        email=user.email,
+        full_name=user.full_name,
+        role=user.role,
+        status=user.status,
+        scopes=user.scopes or [],
+        plan=user_plan,
+        is_pro=(user_plan == "user_pro"),
+    )
+
+
+@router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
 def register(
     data: UserCreate,
     db: Session = Depends(get_db),
@@ -76,10 +91,22 @@ def register(
         details={"role": new_user.role, "email": new_user.email},
     )
 
-    return new_user
+    # Generate token so the user is auto-logged-in after registration
+    token_payload = {
+        "sub": new_user.email,
+        "id": str(new_user.id),
+        "role": new_user.role,
+        "scopes": new_user.scopes or [],
+    }
+    access_token = create_access_token(data=token_payload)
+
+    return AuthResponse(
+        access_token=access_token,
+        user=_make_user_response(db, new_user),
+    )
 
 
-@router.post("/login", response_model=Token)
+@router.post("/login", response_model=AuthResponse)
 def login(
     login_data: UserLogin,
     db: Session = Depends(get_db),
@@ -125,7 +152,10 @@ def login(
         target_id=user.id,
     )
 
-    return Token(access_token=access_token, token_type="bearer")
+    return AuthResponse(
+        access_token=access_token,
+        user=_make_user_response(db, user),
+    )
 
 
 @router.post("/token", response_model=Token, include_in_schema=False)
@@ -165,8 +195,9 @@ def login_for_access_token(
 @router.get("/me", response_model=UserResponse)
 def get_me(
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """
     Retrieves the authenticated user's profile.
     """
-    return current_user
+    return _make_user_response(db, current_user)

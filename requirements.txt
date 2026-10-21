@@ -8,3 +8,4 @@ pydantic
 httpx
 python-multipart
 google-generativeai
+pypdf

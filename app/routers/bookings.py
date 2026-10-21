@@ -37,29 +37,80 @@ def create_booking(
     """
     Client booking creation.
     Depends on require_role("user").
-    CRITICAL: Check if schedule exists and is_booked == False.
-    If yes, create booking with status='pending', set schedule is_booked = True,
-    and log audit ('booking_created'). Return 201.
-    If already booked, return 400.
+    Supports both direct schedule_id booking or lawyer_id + slot booking.
     """
-    schedule_uuid = _parse_uuid(booking_in.schedule_id, "Schedule slot")
+    schedule = None
 
-    schedule = (
-        db.query(Schedule)
-        .options(joinedload(Schedule.lawyer))
-        .filter(Schedule.id == schedule_uuid)
-        .first()
-    )
-    if not schedule:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Schedule slot not found",
+    if booking_in.schedule_id:
+        schedule_uuid = _parse_uuid(booking_in.schedule_id, "Schedule slot")
+        schedule = (
+            db.query(Schedule)
+            .options(joinedload(Schedule.lawyer))
+            .filter(Schedule.id == schedule_uuid)
+            .first()
+        )
+        if not schedule:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Schedule slot not found",
+            )
+        if schedule.is_booked:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Schedule slot is already booked",
+            )
+    elif booking_in.lawyer_id:
+        lawyer_uuid = _parse_uuid(booking_in.lawyer_id, "Lawyer profile")
+        lawyer = db.query(LawyerProfile).filter(LawyerProfile.id == lawyer_uuid).first()
+        if not lawyer:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lawyer profile not found",
+            )
+
+        # Parse requested slot
+        date_str = "Upcoming"
+        time_str = "10:00 AM"
+        if isinstance(booking_in.slot, dict):
+            day_val = booking_in.slot.get("day") or booking_in.slot.get("date")
+            time_val = booking_in.slot.get("time") or booking_in.slot.get("start_time")
+            if day_val:
+                date_str = str(day_val)
+            if time_val:
+                time_str = str(time_val)
+        elif booking_in.date or booking_in.start_time:
+            if booking_in.date:
+                date_str = str(booking_in.date)
+            if booking_in.start_time:
+                time_str = str(booking_in.start_time)
+
+        # Look for existing open schedule slot
+        schedule = (
+            db.query(Schedule)
+            .filter(
+                Schedule.lawyer_id == lawyer_uuid,
+                Schedule.is_booked == False,
+                Schedule.date == date_str,
+                Schedule.start_time == time_str,
+            )
+            .first()
         )
 
-    if schedule.is_booked:
+        if not schedule:
+            schedule = Schedule(
+                id=uuid.uuid4(),
+                lawyer_id=lawyer_uuid,
+                date=date_str,
+                start_time=time_str,
+                end_time=f"{time_str} (30m)",
+                is_booked=True,
+            )
+            db.add(schedule)
+            db.flush()
+    else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Schedule slot is already booked",
+            detail="Either schedule_id or lawyer_id must be provided",
         )
 
     # Mark slot as booked
@@ -89,6 +140,7 @@ def create_booking(
             "date": schedule.date,
             "start_time": schedule.start_time,
             "end_time": schedule.end_time,
+            "case_brief": booking_in.case_brief,
         },
     )
 

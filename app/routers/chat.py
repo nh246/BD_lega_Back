@@ -3,15 +3,17 @@ Chat router: AI legal consultation sessions and messaging.
 Connects with active LLM configuration or mock fallback.
 """
 
-from typing import List
+from datetime import datetime, timezone
+from typing import List, Optional
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import require_role
-from app.models import ChatMessage, ChatSession, LlmConfig, User
+from app.core.deps import get_current_user, require_role
+from app.core.plans import get_user_plan
+from app.models import ChatMessage, ChatSession, DailyUsage, Document, LlmConfig, User
 from app.schemas import (
     ChatMessageCreate,
     ChatMessageResponse,
@@ -21,6 +23,11 @@ from app.schemas import (
 from app.services.llm.base import generate_response
 
 router = APIRouter(prefix="/api", tags=["Chat"])
+
+
+class ChatMessagePayload(ChatMessageCreate):
+    document_id: Optional[str] = None
+    attachment_ids: List[str] = []
 
 
 def _parse_uuid(id_str: str, entity_name: str = "Resource") -> uuid.UUID:
@@ -36,7 +43,7 @@ def _parse_uuid(id_str: str, entity_name: str = "Resource") -> uuid.UUID:
 
 @router.post("/chat", response_model=ChatResponse)
 def send_chat_message(
-    payload: ChatMessageCreate,
+    payload: ChatMessagePayload,
     current_user: User = Depends(require_role("user", "lawyer", "admin")),
     db: Session = Depends(get_db),
 ):
@@ -54,6 +61,109 @@ def send_chat_message(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Chat access restricted",
         )
+
+    plan = get_user_plan(db, current_user)
+
+    # Consolidate attachment_ids and legacy document_id
+    all_attachment_ids = list(payload.attachment_ids or [])
+    if payload.document_id and payload.document_id not in all_attachment_ids:
+        all_attachment_ids.append(payload.document_id)
+
+    if len(all_attachment_ids) > 4:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Maximum of 4 attachments allowed per message.",
+        )
+
+    attached_docs = []
+    if all_attachment_ids:
+        for att_id in all_attachment_ids:
+            try:
+                d_uuid = uuid.UUID(att_id)
+                d = db.query(Document).filter(Document.id == d_uuid).first()
+            except (ValueError, TypeError):
+                d = None
+
+            if not d or d.owner_user_id != current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Document not found",
+                )
+            attached_docs.append(d)
+
+        if plan == "user_free":
+            return JSONResponse(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                content={
+                    "error": "pro_required",
+                    "message": "Document reference and image analysis is a Pro feature. Upgrade to Pro to use attachments.",
+                },
+            )
+
+    text_docs = [d for d in attached_docs if d.kind == "text" or not d.kind]
+    image_docs = [d for d in attached_docs if d.kind == "image"]
+
+    image_parts = []
+    for img in image_docs:
+        if img.file_bytes and img.mime_type:
+            image_parts.append({
+                "mime_type": img.mime_type,
+                "data": bytes(img.file_bytes),
+            })
+
+    today_utc = datetime.now(timezone.utc).date()
+    daily_row = (
+        db.query(DailyUsage)
+        .filter(DailyUsage.user_id == current_user.id, DailyUsage.day == today_utc)
+        .first()
+    )
+    if not daily_row:
+        daily_row = DailyUsage(
+            user_id=current_user.id,
+            day=today_utc,
+            messages_used=0,
+        )
+        db.add(daily_row)
+        try:
+            db.commit()
+            db.refresh(daily_row)
+        except Exception:
+            db.rollback()
+            daily_row = (
+                db.query(DailyUsage)
+                .filter(DailyUsage.user_id == current_user.id, DailyUsage.day == today_utc)
+                .first()
+            )
+
+    if plan == "user_free":
+        if daily_row and daily_row.messages_used >= 10:
+            return JSONResponse(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                content={
+                    "error": "free_limit",
+                    "message": "Daily free limit reached (10 messages). Upgrade to Pro for unlimited queries.",
+                },
+            )
+
+        # b) If the request has no session_id: count ChatSession rows of current_user.
+        if not payload.session_id:
+            session_count = (
+                db.query(ChatSession)
+                .filter(ChatSession.user_id == current_user.id)
+                .count()
+            )
+            if session_count >= 3:
+                return JSONResponse(
+                    status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                    content={
+                        "error": "free_sessions",
+                        "message": "Free plan allows 3 saved sessions. Upgrade to Pro for unlimited sessions.",
+                    },
+                )
+
+        k = 5
+    else:
+        k = 20
 
     # Fetch active LlmConfig from DB
     config = (
@@ -78,6 +188,16 @@ def send_chat_message(
         system_prompt = "You are an AI legal assistant specialized in the laws of Bangladesh."
         disclaimer = "This information is for educational purposes and not a substitute for professional legal advice."
 
+    # Check vision support for image attachments
+    if image_parts and provider != "gemini":
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "error": "vision_unsupported",
+                "message": "Image analysis requires the Gemini provider. Ask the admin to switch model provider.",
+            },
+        )
+
     # Session handling
     session = None
     history = []
@@ -98,7 +218,7 @@ def send_chat_message(
                 db.query(ChatMessage)
                 .filter(ChatMessage.session_id == session.id)
                 .order_by(ChatMessage.created_at.desc())
-                .limit(5)
+                .limit(k)
                 .all()
             )
             recent_msgs.reverse()
@@ -113,6 +233,19 @@ def send_chat_message(
     # Build messages list
     combined_system = f"{system_prompt}\n\n{disclaimer}".strip()
     messages_list = [{"role": "system", "content": combined_system}]
+    if text_docs:
+        excerpts = []
+        for td in text_docs:
+            if td.extracted_text:
+                excerpts.append(f"Document '{td.filename}' (excerpt):\n{td.extracted_text[:6000]}")
+        if excerpts:
+            combined_excerpt = "\n\n".join(excerpts)
+            messages_list.append(
+                {
+                    "role": "system",
+                    "content": f"Reference document (excerpt):\n{combined_excerpt}\n\nUse this document when answering the user's question.",
+                }
+            )
     messages_list.extend(history)
     messages_list.append({"role": "user", "content": payload.content})
 
@@ -124,6 +257,7 @@ def send_chat_message(
             messages=messages_list,
             temp=temp,
             max_tokens=max_tokens,
+            images=image_parts,
         )
     except Exception:
         return JSONResponse(
@@ -151,6 +285,8 @@ def send_chat_message(
     )
     db.add(user_msg)
     db.add(assistant_msg)
+    if daily_row:
+        daily_row.messages_used += 1
     db.commit()
     db.refresh(assistant_msg)
 
@@ -237,3 +373,73 @@ def get_chat_session_messages(
         .all()
     )
     return messages
+
+
+@router.get("/chat/usage")
+def get_chat_usage(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns current plan usage statistics for the authenticated user.
+    """
+    plan = get_user_plan(db, current_user)
+    is_free = (plan == "user_free")
+
+    today_utc = datetime.now(timezone.utc).date()
+    daily_row = (
+        db.query(DailyUsage)
+        .filter(DailyUsage.user_id == current_user.id, DailyUsage.day == today_utc)
+        .first()
+    )
+    messages_today = daily_row.messages_used if daily_row else 0
+
+    sessions_used = (
+        db.query(ChatSession)
+        .filter(ChatSession.user_id == current_user.id)
+        .count()
+    )
+
+    return {
+        "plan": plan,
+        "messages_today": messages_today,
+        "daily_limit": 10 if is_free else None,
+        "sessions_used": sessions_used,
+        "session_limit": 3 if is_free else None,
+    }
+
+
+@router.delete("/chat/sessions/{session_id}")
+def delete_chat_session(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Deletes a chat session and all its messages.
+    Auth required. If session not found or not owned by user -> 404.
+    """
+    try:
+        s_uuid = uuid.UUID(session_id)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found",
+        )
+
+    session = (
+        db.query(ChatSession)
+        .filter(ChatSession.id == s_uuid)
+        .first()
+    )
+    if not session or session.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found",
+        )
+
+    db.query(ChatMessage).filter(ChatMessage.session_id == session.id).delete(synchronize_session=False)
+    db.delete(session)
+    db.commit()
+
+    return {"deleted": True}

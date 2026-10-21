@@ -7,7 +7,7 @@ and administrator transaction auditing.
 from datetime import datetime
 from typing import List, Optional
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
@@ -26,9 +26,13 @@ router = APIRouter(prefix="/api", tags=["Payments"])
 
 
 @router.get("/plans", response_model=List[PlanResponse])
-def get_plans(db: Session = Depends(get_db)):
+def get_plans(
+    role: Optional[str] = Query(None, description="Filter plans by role: 'user' or 'lawyer'"),
+    db: Session = Depends(get_db),
+):
     """
-    Public endpoint. Returns all subscription plans from the database.
+    Public endpoint. Returns subscription plans from the database.
+    Can be filtered by role (e.g. ?role=user or ?role=lawyer).
     """
     plans = db.query(Plan).order_by(Plan.price_monthly.asc()).all()
     if not plans:
@@ -38,31 +42,50 @@ def get_plans(db: Session = Depends(get_db)):
                 code="user_free",
                 name="Free Plan",
                 price_monthly=0.0,
-                features=["Standard Gemini AI Chat", "Browse Lawyer Directory", "Book Consultations"],
+                features=["Standard Gemini AI Chat", "Browse Lawyer Directory", "Book Consultations", "Basic Session History"],
             ),
             Plan(
                 code="user_pro",
                 name="Pro Plan",
                 price_monthly=299.0,
-                features=["RAG Legal Citations", "Document Analysis", "Priority Consultations", "Unlimited AI"],
+                features=[
+                    "Unlimited AI chat queries and saved sessions",
+                    "Extended AI memory (20-turn context vs 5)",
+                    "AI confidence score on every answer",
+                    "Direct messaging with verified lawyers",
+                    "Priority handling of consultation requests",
+                ],
             ),
             Plan(
                 code="lawyer_basic",
                 name="Lawyer Basic",
                 price_monthly=0.0,
-                features=["Directory Listing", "Receive Consultation Requests"],
+                features=["Directory Listing", "Receive Consultation Requests", "Manual Schedule Management"],
             ),
             Plan(
                 code="lawyer_verified",
                 name="Lawyer Verified Badge",
                 price_monthly=999.0,
-                features=["Verified Badge", "Priority Ranking", "Video Consultation"],
+                features=[
+                    "Bar Council Verified Badge",
+                    "Priority Search & Directory Ranking",
+                    "Instant Meeting Link Generation",
+                    "Direct Client Video Consultation",
+                    "Priority Payouts",
+                ],
             ),
         ]
         for d in defaults:
             db.add(d)
         db.commit()
         plans = db.query(Plan).order_by(Plan.price_monthly.asc()).all()
+
+    if role:
+        r = role.strip().lower()
+        if r in ["user", "client"]:
+            plans = [p for p in plans if "lawyer" not in (p.code or "").lower()]
+        elif r in ["lawyer", "advocate"]:
+            plans = [p for p in plans if "lawyer" in (p.code or "").lower()]
 
     return plans
 
@@ -76,12 +99,25 @@ def create_subscription_checkout(
     """
     Creates a pending Subscription and executes payment session creation.
     Defaults to instant-approval 'demo' provider for testing.
+    Ensures user accounts get client plans and lawyer accounts get lawyer plans.
     """
     plan = db.query(Plan).filter(Plan.code == payload.plan_code.strip()).first()
     if not plan:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Plan '{payload.plan_code}' not found",
+        )
+
+    # Role matching validation
+    if current_user.role == "lawyer" and not plan.code.startswith("lawyer_"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Lawyers can only subscribe to Lawyer plans (Lawyer Basic or Lawyer Verified Badge).",
+        )
+    if current_user.role == "user" and not plan.code.startswith("user_"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Clients can only subscribe to Client plans (Free or Pro).",
         )
 
     # Create pending Subscription record
@@ -98,6 +134,15 @@ def create_subscription_checkout(
     # Provider: default to demo
     provider_name = payload.provider or "demo"
 
+    lawyer_profile_id = None
+    if current_user.role == "lawyer":
+        profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+        if profile:
+            lawyer_profile_id = profile.id
+            if plan.code == "lawyer_verified":
+                profile.verification_paid = True
+                db.commit()
+
     # Call payment service adapter
     checkout_session = create_checkout_session(
         db=db,
@@ -106,6 +151,7 @@ def create_subscription_checkout(
         amount=plan.price_monthly,
         provider=provider_name,
         subscription_id=subscription.id,
+        lawyer_profile_id=lawyer_profile_id,
     )
 
     return CheckoutResponse(

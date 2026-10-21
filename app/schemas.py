@@ -42,6 +42,8 @@ class UserResponse(BaseModel):
     role: str
     status: str
     scopes: Optional[List[str]] = None
+    plan: Optional[str] = "user_free"
+    is_pro: Optional[bool] = False
 
     @field_validator("id", mode="before")
     @classmethod
@@ -54,6 +56,13 @@ class UserResponse(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+class AuthResponse(BaseModel):
+    """Combined auth response for login/register — includes JWT and user profile."""
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
 
 
 class AuditLogResponse(BaseModel):
@@ -247,7 +256,18 @@ class BookingResponse(BaseModel):
 
 
 class BookingCreate(BaseModel):
-    schedule_id: str
+    schedule_id: Optional[str] = None
+    lawyer_id: Optional[str] = None
+    slot: Optional[Any] = None
+    case_brief: Optional[str] = None
+    date: Optional[str] = None
+    start_time: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_reference(self):
+        if not self.schedule_id and not self.lawyer_id:
+            raise ValueError("Either schedule_id or lawyer_id must be provided to create a booking.")
+        return self
 
 
 class BookingUpdate(BaseModel):
@@ -408,6 +428,9 @@ class PlanResponse(BaseModel):
     price_monthly: float
     features: List[str]
     price: Optional[Any] = None
+    target_role: Optional[str] = "user"
+    description: Optional[str] = None
+    popular: Optional[bool] = False
 
     @field_validator("id", mode="before")
     @classmethod
@@ -417,9 +440,26 @@ class PlanResponse(BaseModel):
         return str(v) if v is not None else ""
 
     @model_validator(mode="after")
-    def populate_price(self):
+    def populate_fields(self):
         if self.price is None:
             self.price = self.price_monthly
+        if not self.target_role:
+            if "lawyer" in self.code.lower():
+                self.target_role = "lawyer"
+            else:
+                self.target_role = "user"
+        if not self.description:
+            if self.code == "user_free":
+                self.description = "Essential legal AI guidance and lawyer search for everyday citizens."
+            elif self.code == "user_pro":
+                self.description = "Deep legal intelligence with BD Penal Code citations & document review."
+            elif self.code == "lawyer_basic":
+                self.description = "Standard listing in the Bangladesh lawyer directory & consultation requests."
+            elif self.code == "lawyer_verified":
+                self.description = "Verified Bar Council badge, priority placement & video meeting suite."
+        if not self.popular:
+            if self.code in ["user_pro", "lawyer_verified"]:
+                self.popular = True
         return self
 
 
@@ -515,6 +555,49 @@ class CheckoutResponse(BaseModel):
     status: str
     subscription_id: Optional[str] = None
     payment_id: Optional[str] = None
+
+
+# --- Direct Messaging Schemas ---
+
+class DirectMessageCreate(BaseModel):
+    content: str = Field(..., min_length=1)
+
+
+class DirectMessageResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    sender_user_id: str
+    lawyer_profile_id: str
+    recipient_user_id: Optional[str] = None
+    content: str
+    is_read: bool = False
+    created_at: str
+    sender_name: Optional[str] = None
+    sender_role: Optional[str] = None
+
+    @field_validator("id", "sender_user_id", "lawyer_profile_id", "recipient_user_id", mode="before")
+    @classmethod
+    def serialize_uuid(cls, v):
+        if isinstance(v, uuid.UUID):
+            return str(v)
+        return str(v) if v is not None else None
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def serialize_datetime(cls, v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v) if v is not None else ""
+
+
+class LawyerInboxItem(BaseModel):
+    user_id: str
+    name: str
+    last_message: str
+    last_time: str
+    unread_count: int = 0
+
 
 
 

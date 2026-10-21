@@ -13,8 +13,11 @@ from sqlalchemy import (
     Float,
     Integer,
     DateTime,
+    Date,
     ForeignKey,
     JSON,
+    LargeBinary,
+    UniqueConstraint,
 )
 from sqlalchemy.types import Uuid
 from sqlalchemy.orm import relationship
@@ -169,6 +172,10 @@ class Plan(Base):
     price_monthly = Column(Float, default=0.0, nullable=False)
     features = Column(JSON, nullable=True)
 
+    @property
+    def target_role(self) -> str:
+        return "lawyer" if "lawyer" in (self.code or "").lower() else "user"
+
     # Relationships
     subscriptions = relationship("Subscription", back_populates="plan")
 
@@ -224,3 +231,57 @@ class AuditLog(Base):
 
     # Relationships
     actor = relationship("User", back_populates="audit_logs", foreign_keys=[actor_id])
+
+
+class DirectMessage(Base):
+    __tablename__ = "direct_messages"
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    sender_user_id = Column(Uuid, ForeignKey("users.id"), nullable=False)
+    lawyer_profile_id = Column(Uuid, ForeignKey("lawyer_profiles.id"), nullable=False)
+    recipient_user_id = Column(Uuid, ForeignKey("users.id"), nullable=True)
+    content = Column(Text, nullable=False)
+    is_read = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Relationships
+    sender = relationship("User", foreign_keys=[sender_user_id])
+    recipient = relationship("User", foreign_keys=[recipient_user_id])
+    lawyer_profile = relationship("LawyerProfile", foreign_keys=[lawyer_profile_id])
+
+
+class Document(Base):
+    __tablename__ = "documents"
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    owner_user_id = Column(Uuid, ForeignKey("users.id"), nullable=False)
+    filename = Column(String(255), nullable=False)
+    file_type = Column(String(10), nullable=False)
+    extracted_text = Column(Text, nullable=False)
+    char_count = Column(Integer, nullable=False)
+    kind = Column(String(50), default="text", nullable=False)
+    mime_type = Column(String(100), nullable=True)
+    file_bytes = Column(LargeBinary, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Relationships
+    owner = relationship("User", foreign_keys=[owner_user_id])
+
+
+class DailyUsage(Base):
+    __tablename__ = "daily_usage"
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id = Column(Uuid, ForeignKey("users.id"), nullable=False)
+    day = Column(Date, nullable=False)
+    messages_used = Column(Integer, default=0, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "day", name="uq_daily_usage_user_day"),
+    )
+
+    # Relationships
+    user = relationship("User", foreign_keys=[user_id])
+
+
+
