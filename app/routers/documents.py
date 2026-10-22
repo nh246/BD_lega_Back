@@ -66,10 +66,10 @@ async def upload_document(
         )
 
     content_bytes = await file.read()
-    if len(content_bytes) > 5 * 1024 * 1024:
+    if len(content_bytes) > 2 * 1024 * 1024:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="File size exceeds maximum limit of 5 MB.",
+            detail="File size exceeds maximum limit of 2 MB.",
         )
 
     if ext in IMAGE_MIME_TYPES:

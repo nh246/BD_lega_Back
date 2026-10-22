@@ -19,8 +19,9 @@ from app.routers.bookings import router as booking_router
 from app.routers.chat import router as chat_router
 from app.routers.llm_config import router as llm_config_router
 from app.routers.payments import router as payment_router
-from app.routers.messages import router as messages_router
+from app.routers.messages import router as messages_router, compat_router as messages_compat_router
 from app.routers.documents import router as documents_router
+from app.routers.assets import router as assets_router
 
 app = FastAPI(title="BD Legal Guide AI API")
 
@@ -42,7 +43,9 @@ app.include_router(chat_router)
 app.include_router(llm_config_router)
 app.include_router(payment_router)
 app.include_router(messages_router)
+app.include_router(messages_compat_router)
 app.include_router(documents_router)
+app.include_router(assets_router)
 
 
 

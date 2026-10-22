@@ -302,6 +302,8 @@ class ChatResponse(BaseModel):
     content: Optional[str] = None
     response: Optional[str] = None
     message: Optional[str] = None
+    confidence: Optional[int] = None
+    confidence_reason: Optional[str] = None
 
     @model_validator(mode="after")
     def populate_aliases(self):
@@ -400,6 +402,8 @@ class ChatMessageResponse(BaseModel):
     content: str
     provider: Optional[str] = None
     model: Optional[str] = None
+    confidence_score: Optional[int] = None
+    confidence_reason: Optional[str] = None
     created_at: str
 
     @field_validator("id", "session_id", mode="before")

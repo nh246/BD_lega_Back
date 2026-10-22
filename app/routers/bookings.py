@@ -3,6 +3,7 @@ Bookings router: Client booking creation, client's bookings listing,
 and lawyer booking management (confirmation/cancellation).
 """
 
+from datetime import datetime, timezone
 from typing import List
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -10,11 +11,15 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_role
-from app.models import Booking, LawyerProfile, Schedule, User
+from app.models import Booking, LawyerProfile, Schedule, User, Subscription, Plan
 from app.schemas import BookingCreate, BookingResponse, BookingUpdate
 from app.audit import log_audit
 
 router = APIRouter(prefix="/api", tags=["Bookings"])
+
+
+class LawyerBookingResponse(BookingResponse):
+    is_pro: bool = False
 
 
 def _parse_uuid(id_str: str, entity_name: str = "Booking") -> uuid.UUID:
@@ -181,15 +186,16 @@ def get_my_bookings(
     return bookings
 
 
-@router.get("/lawyer/bookings", response_model=List[BookingResponse])
-@router.get("/lawyer/requests", response_model=List[BookingResponse])
+@router.get("/lawyer/bookings", response_model=List[LawyerBookingResponse])
+@router.get("/lawyer/requests", response_model=List[LawyerBookingResponse])
 def get_lawyer_bookings(
     current_user: User = Depends(require_role("lawyer")),
     db: Session = Depends(get_db),
 ):
     """
     Returns all bookings/requests where the schedule belongs to the current lawyer,
-    joined with user name. Supports both /lawyer/bookings and /lawyer/requests.
+    joined with user name and is_pro flag. Supports both /lawyer/bookings and /lawyer/requests.
+    Sorted Pro users first (is_pro == True), then by created_at ascending (oldest first).
     """
     profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
     if not profile:
@@ -206,10 +212,26 @@ def get_lawyer_bookings(
             joinedload(Booking.schedule),
         )
         .filter(Booking.lawyer_id == profile.id)
-        .order_by(Booking.created_at.desc())
         .all()
     )
-    return bookings
+
+    pro_user_ids = set(
+        sub.user_id for sub in db.query(Subscription)
+        .join(Plan)
+        .filter(Subscription.status == "active")
+        .filter(Plan.code == "user_pro")
+        .filter(Subscription.expires_at > datetime.now(timezone.utc))
+        .all()
+    )
+
+    booking_dicts = []
+    for booking in bookings:
+        b_dict = BookingResponse.model_validate(booking).model_dump()
+        b_dict["is_pro"] = (booking.user_id in pro_user_ids) or (str(booking.user_id) in {str(u) for u in pro_user_ids})
+        booking_dicts.append(b_dict)
+
+    sorted_bookings = sorted(booking_dicts, key=lambda b: (not b["is_pro"], b["created_at"]))
+    return sorted_bookings
 
 
 @router.get("/lawyer/requests/{booking_id}", response_model=BookingResponse)

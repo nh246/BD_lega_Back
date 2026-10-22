@@ -3,6 +3,8 @@ LLM base service adapter.
 Provides unified generation interface supporting 'mock' and 'gemini' providers with timeouts and error handling.
 """
 
+import json
+import re
 from typing import Any, Dict, List
 import google.generativeai as genai
 
@@ -110,3 +112,54 @@ def generate_response(
 
     # If any other provider is passed, raise a clear exception or fallback
     raise ValueError(f"Unsupported LLM provider: '{provider}'. Supported providers are 'mock' and 'gemini'.")
+
+
+def self_evaluate(
+    provider: str,
+    model: str,
+    question: str,
+    answer: str,
+    temp: float = 0.2,
+) -> dict | None:
+    """
+    Self-evaluates the confidence of the assistant answer against the user question.
+    Returns {"confidence": int (0-100), "reason": str} or None on any error.
+    """
+    try:
+        prov = (provider or "mock").strip().lower()
+        if prov == "mock":
+            return {
+                "confidence": 85,
+                "reason": "Mock self-evaluation for demonstration.",
+            }
+
+        prompt = (
+            "You are a calibration evaluator. Given a user question and an "
+            "assistant answer about Bangladesh law, rate the assistant's "
+            "confidence that the answer is accurate and relevant.\n"
+            'Respond ONLY with JSON: {"confidence": <int 0-100>, "reason": "<one sentence>"}.\n\n'
+            f"User Question:\n{question}\n\n"
+            f"Assistant Answer:\n{answer}"
+        )
+
+        raw_response = generate_response(
+            provider=prov,
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temp=temp,
+            max_tokens=256,
+        )
+
+        match = re.search(r"\{[^{}]*\}", raw_response, re.DOTALL)
+        if match:
+            data = json.loads(match.group(0))
+            if "confidence" in data and "reason" in data:
+                conf = int(data["confidence"])
+                return {
+                    "confidence": max(0, min(100, conf)),
+                    "reason": str(data["reason"]).strip(),
+                }
+        return None
+    except Exception:
+        return None
+

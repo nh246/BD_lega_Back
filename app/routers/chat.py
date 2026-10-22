@@ -20,7 +20,7 @@ from app.schemas import (
     ChatResponse,
     ChatSessionResponse,
 )
-from app.services.llm.base import generate_response
+from app.services.llm.base import generate_response, self_evaluate
 
 router = APIRouter(prefix="/api", tags=["Chat"])
 
@@ -268,6 +268,27 @@ def send_chat_message(
             },
         )
 
+    # Self-evaluate confidence for Pro plans
+    confidence = None
+    reason = None
+    if plan != "user_free":
+        try:
+            eval_res = self_evaluate(
+                provider=provider,
+                model=model,
+                question=payload.content,
+                answer=reply_text,
+                temp=0.2,
+            )
+            if eval_res and isinstance(eval_res, dict):
+                raw_conf = eval_res.get("confidence")
+                if raw_conf is not None:
+                    confidence = max(0, min(100, int(raw_conf)))
+                reason = eval_res.get("reason")
+        except Exception:
+            confidence = None
+            reason = None
+
     # Save user message and assistant message
     user_msg = ChatMessage(
         session_id=session.id,
@@ -282,6 +303,8 @@ def send_chat_message(
         content=reply_text,
         provider=provider,
         model=model,
+        confidence_score=confidence,
+        confidence_reason=reason,
     )
     db.add(user_msg)
     db.add(assistant_msg)
@@ -300,6 +323,8 @@ def send_chat_message(
         content=reply_text,
         response=reply_text,
         message=reply_text,
+        confidence=confidence,
+        confidence_reason=reason,
     )
 
 

@@ -18,6 +18,7 @@ from sqlalchemy import (
     JSON,
     LargeBinary,
     UniqueConstraint,
+    Index,
 )
 from sqlalchemy.types import Uuid
 from sqlalchemy.orm import relationship
@@ -141,6 +142,8 @@ class ChatMessage(Base):
     content = Column(Text, nullable=False)
     provider = Column(String(50), nullable=True)
     model = Column(String(100), nullable=True)
+    confidence_score = Column(Integer, nullable=True)
+    confidence_reason = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Relationships
@@ -235,6 +238,10 @@ class AuditLog(Base):
 
 class DirectMessage(Base):
     __tablename__ = "direct_messages"
+    __table_args__ = (
+        Index("ix_direct_messages_lawyer_created", "lawyer_profile_id", "created_at"),
+        Index("ix_direct_messages_sender_created", "sender_user_id", "created_at"),
+    )
 
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     sender_user_id = Column(Uuid, ForeignKey("users.id"), nullable=False)
@@ -282,6 +289,22 @@ class DailyUsage(Base):
 
     # Relationships
     user = relationship("User", foreign_keys=[user_id])
+
+
+class ProfileAsset(Base):
+    __tablename__ = "profile_assets"
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    owner_user_id = Column(Uuid, ForeignKey("users.id"), nullable=False)
+    kind = Column(String(50), nullable=False)  # 'avatar' or 'verification'
+    filename = Column(String(255), nullable=False)
+    mime_type = Column(String(100), nullable=False)
+    file_bytes = Column(LargeBinary, nullable=False)
+    size_bytes = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Relationships
+    owner = relationship("User", foreign_keys=[owner_user_id])
 
 
 
