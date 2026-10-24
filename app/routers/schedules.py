@@ -2,9 +2,11 @@
 Schedules router: Lawyer availability slots management and public slot querying.
 """
 
+from datetime import date, datetime
 from typing import List
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -81,6 +83,7 @@ def get_my_schedules(
 
 
 @router.post("/lawyer/schedules", response_model=ScheduleResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/schedules", response_model=ScheduleResponse, status_code=status.HTTP_201_CREATED)
 def create_lawyer_schedule(
     schedule_in: ScheduleCreate,
     current_user: User = Depends(require_role("lawyer")),
@@ -88,7 +91,8 @@ def create_lawyer_schedule(
 ):
     """
     Creates a new schedule slot for the currently logged-in lawyer.
-    CRITICAL: Verify the logged-in user actually has a lawyer_profiles row. If not, return 403.
+    Accepts date as ISO string "YYYY-MM-DD" plus start_time/end_time.
+    Rejects dates in the past with 400 {"error":"past_date","message":"Slots must be in the future."}.
     """
     profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
     if not profile:
@@ -97,9 +101,31 @@ def create_lawyer_schedule(
             detail="User does not have an associated lawyer profile",
         )
 
+    raw_date = schedule_in.date.strip() if schedule_in.date else ""
+    try:
+        parsed_date = datetime.strptime(raw_date, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "error": "invalid_date",
+                "message": "Date must be an ISO format string (YYYY-MM-DD).",
+            },
+        )
+
+    today = date.today()
+    if parsed_date < today:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "error": "past_date",
+                "message": "Slots must be in the future.",
+            },
+        )
+
     new_schedule = Schedule(
         lawyer_id=profile.id,
-        date=schedule_in.date.strip(),
+        date=parsed_date,
         start_time=schedule_in.start_time.strip(),
         end_time=schedule_in.end_time.strip(),
         is_booked=False,

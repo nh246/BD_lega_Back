@@ -27,7 +27,12 @@ app = FastAPI(title="BD Legal Guide AI API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -51,8 +56,22 @@ app.include_router(assets_router)
 
 @app.on_event("startup")
 def on_startup():
-    """Create all core database tables on application startup."""
+    """Create all core database tables on application startup and ensure schema migrations."""
     Base.metadata.create_all(bind=engine)
+    try:
+        from sqlalchemy import inspect
+        inspector = inspect(engine)
+        cols = [c['name'] for c in inspector.get_columns('lawyer_profiles')]
+        with engine.connect() as conn:
+            if 'hourly_rate' not in cols:
+                conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN hourly_rate INTEGER DEFAULT 2000"))
+            if 'years_exp' not in cols:
+                conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN years_exp INTEGER DEFAULT 8"))
+            if 'languages' not in cols:
+                conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN languages VARCHAR(255) DEFAULT 'Bangla, English'"))
+            conn.commit()
+    except Exception:
+        pass
 
 
 @app.get("/health")

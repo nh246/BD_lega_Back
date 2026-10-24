@@ -93,17 +93,21 @@ class AuditLogResponse(BaseModel):
 
 # --- Module 4: Lawyer & Law Firm Schemas ---
 
-class LawyerResponse(BaseModel):
+class LawyerListResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
     name: str
     district: Optional[str] = None
     specialization: Optional[str] = None
-    phone: Optional[str] = None
     verification_status: str
     bar_council_id: Optional[str] = None
     verification_paid: Optional[bool] = False
+    avatar_asset_id: Optional[str] = None
+    next_available: Optional[Dict[str, Any]] = None
+    hourly_rate: Optional[int] = 2000
+    years_exp: Optional[int] = 8
+    languages: Optional[str] = "Bangla, English"
 
     @field_validator("id", mode="before")
     @classmethod
@@ -112,6 +116,17 @@ class LawyerResponse(BaseModel):
             return str(v)
         return str(v) if v is not None else ""
 
+    @field_validator("avatar_asset_id", mode="before")
+    @classmethod
+    def serialize_avatar_asset_id(cls, v):
+        if isinstance(v, uuid.UUID):
+            return str(v)
+        return str(v) if v is not None else None
+
+
+class LawyerResponse(LawyerListResponse):
+    phone: Optional[str] = None
+
 
 class LawyerUpdate(BaseModel):
     name: Optional[str] = None
@@ -119,6 +134,9 @@ class LawyerUpdate(BaseModel):
     specialization: Optional[str] = None
     phone: Optional[str] = None
     verification_status: Optional[str] = None
+    hourly_rate: Optional[int] = None
+    years_exp: Optional[int] = None
+    languages: Optional[str] = None
 
 
 class FirmResponse(BaseModel):
@@ -167,6 +185,13 @@ class ScheduleResponse(BaseModel):
             return ""
         return str(v)
 
+    @field_validator("date", mode="before")
+    @classmethod
+    def serialize_date(cls, v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v) if v is not None else ""
+
 
 class ScheduleCreate(BaseModel):
     date: str
@@ -187,6 +212,7 @@ class BookingResponse(BaseModel):
     user_name: Optional[str] = None
     meet_link: Optional[str] = None
     scheduled_time: Optional[str] = None
+    schedule_date: Optional[str] = None
     date: Optional[str] = None
     start_time: Optional[str] = None
     end_time: Optional[str] = None
@@ -209,6 +235,13 @@ class BookingResponse(BaseModel):
     @classmethod
     def extract_relations(cls, data: Any):
         if isinstance(data, dict):
+            s_date = data.get("schedule_date") or data.get("date")
+            if hasattr(s_date, "isoformat"):
+                s_date = s_date.isoformat()
+            elif s_date is not None:
+                s_date = str(s_date)
+            data["schedule_date"] = s_date
+            data["date"] = s_date
             return data
 
         lawyer_name = None
@@ -222,7 +255,11 @@ class BookingResponse(BaseModel):
         if hasattr(data, "user") and data.user:
             user_name = getattr(data.user, "full_name", None)
         if hasattr(data, "schedule") and data.schedule:
-            date_val = getattr(data.schedule, "date", None)
+            raw_sched_date = getattr(data.schedule, "date", None)
+            if hasattr(raw_sched_date, "isoformat"):
+                date_val = raw_sched_date.isoformat()
+            else:
+                date_val = str(raw_sched_date) if raw_sched_date is not None else None
             start_time_val = getattr(data.schedule, "start_time", None)
             end_time_val = getattr(data.schedule, "end_time", None)
 
@@ -249,6 +286,7 @@ class BookingResponse(BaseModel):
             "user_name": user_name or getattr(data, "user_name", None),
             "meet_link": getattr(data, "meet_link", None),
             "scheduled_time": scheduled_time,
+            "schedule_date": date_val,
             "date": date_val,
             "start_time": start_time_val,
             "end_time": end_time_val,

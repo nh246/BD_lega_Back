@@ -22,35 +22,57 @@ DEMO_PASSWORD = "Password123!"
 DEMO_ACCOUNTS = [
     {
         "email": "free_user@bdlegal.ai",
-        "full_name": "Rahim Ahmed (Free User)",
+        "full_name": "Rahim Ahmed",
         "role": "user",
         "is_pro": False,
     },
     {
         "email": "pro_user@bdlegal.ai",
-        "full_name": "Karim Chowdhury (Pro User)",
+        "full_name": "Karim Chowdhury",
         "role": "user",
         "is_pro": True,
     },
     {
         "email": "free_lawyer@bdlegal.ai",
-        "full_name": "Adv. Tanvir Hasan (Free Lawyer)",
+        "full_name": "Adv. Tanvir Hasan",
         "role": "lawyer",
         "is_pro": False,
+        "verification_status": "approved",
         "bar_id": "BC-DH-2019-3321",
         "specialization": "Civil Litigation & Land Disputes",
         "district": "Dhaka",
         "phone": "+8801711002233",
+        "hourly_rate": 1500,
+        "years_exp": 7,
+        "languages": "Bangla, English",
     },
     {
         "email": "pro_lawyer@bdlegal.ai",
-        "full_name": "Adv. Nusrat Jahan (Verified Pro)",
+        "full_name": "Adv. Nusrat Jahan",
         "role": "lawyer",
         "is_pro": True,
+        "verification_status": "approved",
         "bar_id": "BC-SC-2015-8842",
         "specialization": "Corporate Law & Criminal Defense",
         "district": "Dhaka",
         "phone": "+8801811445566",
+        "hourly_rate": 2500,
+        "years_exp": 11,
+        "languages": "Bangla, English",
+    },
+    {
+        "email": "pending_lawyer@bdlegal.ai",
+        "full_name": "Adv. Mahmudul Hasan",
+        "role": "lawyer",
+        "is_pro": False,
+        "verification_status": "pending",
+        "bar_id": "BD-BAR-2020-1188",
+        "specialization": "Family Law & Property",
+        "district": "Dhaka",
+        "phone": "+8801733445566",
+        "hourly_rate": 1800,
+        "years_exp": 6,
+        "languages": "Bangla, English",
     },
 ]
 
@@ -173,6 +195,7 @@ def seed_demo_accounts():
 
             # Handle LawyerProfile & Schedules for Lawyer accounts
             if acc["role"] == "lawyer":
+                verif_status = acc.get("verification_status", "approved")
                 profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == user.id).first()
                 if not profile:
                     profile = LawyerProfile(
@@ -183,53 +206,72 @@ def seed_demo_accounts():
                         district=acc["district"],
                         specialization=acc["specialization"],
                         phone=acc["phone"],
-                        verification_status="approved",
+                        verification_status=verif_status,
                         verification_paid=acc["is_pro"],
+                        hourly_rate=acc.get("hourly_rate", 2000),
+                        years_exp=acc.get("years_exp", 8),
+                        languages=acc.get("languages", "Bangla, English"),
                     )
                     db.add(profile)
                     db.commit()
                     db.refresh(profile)
-                    print(f" -> Created LawyerProfile for {email} (verified_paid={acc['is_pro']})")
+                    print(f" -> Created LawyerProfile for {email} ({verif_status})")
                 else:
                     profile.name = acc["full_name"]
                     profile.bar_council_id = acc["bar_id"]
                     profile.district = acc["district"]
                     profile.specialization = acc["specialization"]
                     profile.phone = acc["phone"]
-                    profile.verification_status = "approved"
+                    profile.verification_status = verif_status
                     profile.verification_paid = acc["is_pro"]
+                    profile.hourly_rate = acc.get("hourly_rate", 2000)
+                    profile.years_exp = acc.get("years_exp", 8)
+                    profile.languages = acc.get("languages", "Bangla, English")
                     db.commit()
-                    print(f" -> Updated LawyerProfile for {email} (verified_paid={acc['is_pro']})")
+                    print(f" -> Updated LawyerProfile for {email} ({verif_status})")
 
-                # Ensure sample schedules exist so user can immediately test bookings
-                sched_count = db.query(Schedule).filter(Schedule.lawyer_id == profile.id).count()
-                if sched_count == 0:
-                    sample_slots = [
-                        {"date": "Mon", "start_time": "10:00 AM", "end_time": "11:00 AM"},
-                        {"date": "Tue", "start_time": "02:00 PM", "end_time": "03:00 PM"},
-                        {"date": "Wed", "start_time": "11:00 AM", "end_time": "12:00 PM"},
-                        {"date": "Thu", "start_time": "04:00 PM", "end_time": "05:00 PM"},
+                # Ensure 6 future slots exist within the next 7 days ONLY for approved lawyers
+                if verif_status == "approved":
+                    today = datetime.now().date()
+                    future_slots = [
+                        {"date": today + timedelta(days=1), "start_time": "10:00 AM", "end_time": "10:30 AM"},
+                        {"date": today + timedelta(days=1), "start_time": "02:00 PM", "end_time": "02:30 PM"},
+                        {"date": today + timedelta(days=2), "start_time": "11:00 AM", "end_time": "11:30 AM"},
+                        {"date": today + timedelta(days=3), "start_time": "03:00 PM", "end_time": "03:30 PM"},
+                        {"date": today + timedelta(days=4), "start_time": "10:00 AM", "end_time": "10:30 AM"},
+                        {"date": today + timedelta(days=5), "start_time": "04:00 PM", "end_time": "04:30 PM"},
                     ]
-                    for s in sample_slots:
-                        db.add(
-                            Schedule(
-                                id=uuid.uuid4(),
-                                lawyer_id=profile.id,
-                                date=s["date"],
-                                start_time=s["start_time"],
-                                end_time=s["end_time"],
-                                is_booked=False,
+                    for s in future_slots:
+                        existing_slot = (
+                            db.query(Schedule)
+                            .filter(
+                                Schedule.lawyer_id == profile.id,
+                                Schedule.date == s["date"],
+                                Schedule.start_time == s["start_time"],
                             )
+                            .first()
                         )
+                        if not existing_slot:
+                            db.add(
+                                Schedule(
+                                    id=uuid.uuid4(),
+                                    lawyer_id=profile.id,
+                                    date=s["date"],
+                                    start_time=s["start_time"],
+                                    end_time=s["end_time"],
+                                    is_booked=False,
+                                )
+                            )
                     db.commit()
-                    print(f" -> Added 4 availability slots for {acc['full_name']}")
+                    print(f" -> Ensured future availability slots exist for {acc['full_name']}")
 
         print("\nAll demo accounts seeded successfully!")
-        print("Credentials for all 4 accounts:")
-        print("  1. Free User:       free_user@bdlegal.ai   | Password123!")
-        print("  2. Pro User:        pro_user@bdlegal.ai    | Password123!")
-        print("  3. Free Lawyer:     free_lawyer@bdlegal.ai | Password123!")
-        print("  4. Verified Lawyer: pro_lawyer@bdlegal.ai  | Password123!")
+        print("Credentials for demo accounts:")
+        print("  1. Free User:       free_user@bdlegal.ai      | Password123!")
+        print("  2. Pro User:        pro_user@bdlegal.ai       | Password123!")
+        print("  3. Free Lawyer:     free_lawyer@bdlegal.ai    | Password123!")
+        print("  4. Verified Lawyer: pro_lawyer@bdlegal.ai     | Password123!")
+        print("  5. Pending Lawyer:  pending_lawyer@bdlegal.ai | Password123!")
 
     finally:
         db.close()

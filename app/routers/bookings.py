@@ -3,7 +3,7 @@ Bookings router: Client booking creation, client's bookings listing,
 and lawyer booking management (confirmation/cancellation).
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from typing import List
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -74,7 +74,7 @@ def create_booking(
             )
 
         # Parse requested slot
-        date_str = "Upcoming"
+        date_str = None
         time_str = "10:00 AM"
         if isinstance(booking_in.slot, dict):
             day_val = booking_in.slot.get("day") or booking_in.slot.get("date")
@@ -89,13 +89,22 @@ def create_booking(
             if booking_in.start_time:
                 time_str = str(booking_in.start_time)
 
+        parsed_target_date = None
+        if date_str:
+            try:
+                parsed_target_date = datetime.strptime(str(date_str).strip(), "%Y-%m-%d").date()
+            except Exception:
+                pass
+        if not parsed_target_date:
+            parsed_target_date = datetime.now(timezone.utc).date()
+
         # Look for existing open schedule slot
         schedule = (
             db.query(Schedule)
             .filter(
                 Schedule.lawyer_id == lawyer_uuid,
                 Schedule.is_booked == False,
-                Schedule.date == date_str,
+                Schedule.date == parsed_target_date,
                 Schedule.start_time == time_str,
             )
             .first()
@@ -105,7 +114,7 @@ def create_booking(
             schedule = Schedule(
                 id=uuid.uuid4(),
                 lawyer_id=lawyer_uuid,
-                date=date_str,
+                date=parsed_target_date,
                 start_time=time_str,
                 end_time=f"{time_str} (30m)",
                 is_booked=True,
@@ -142,7 +151,7 @@ def create_booking(
         details={
             "schedule_id": str(schedule.id),
             "lawyer_id": str(schedule.lawyer_id),
-            "date": schedule.date,
+            "date": schedule.date.isoformat() if hasattr(schedule.date, "isoformat") else str(schedule.date),
             "start_time": schedule.start_time,
             "end_time": schedule.end_time,
             "case_brief": booking_in.case_brief,

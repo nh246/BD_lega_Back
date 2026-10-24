@@ -4,8 +4,10 @@ Authentication router: Registration, Login, Token generation, and Current User e
 
 import uuid
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -201,3 +203,71 @@ def get_me(
     Retrieves the authenticated user's profile.
     """
     return _make_user_response(db, current_user)
+
+
+class UserUpdateMe(BaseModel):
+    full_name: Optional[object] = None
+
+
+@router.patch("/me")
+@router.patch("/me/")
+def update_me(
+    payload: Optional[UserUpdateMe] = Body(default=None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Updates the authenticated user's full_name.
+    Validates that full_name stripped is between 2 and 100 characters.
+    Does NOT allow changing email, role, or status.
+    """
+    raw_name = payload.full_name if payload else None
+    if not isinstance(raw_name, str):
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "error": "invalid_name",
+                "message": "Name must be between 2 and 100 characters.",
+            },
+        )
+
+    cleaned_name = raw_name.strip()
+    if len(cleaned_name) < 2 or len(cleaned_name) > 100:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "error": "invalid_name",
+                "message": "Name must be between 2 and 100 characters.",
+            },
+        )
+
+    current_user.full_name = cleaned_name
+
+    # If the user is a lawyer, keep their lawyer profile name in sync
+    lawyer_profile = (
+        db.query(LawyerProfile)
+        .filter(LawyerProfile.user_id == current_user.id)
+        .first()
+    )
+    if lawyer_profile:
+        lawyer_profile.name = cleaned_name
+
+    db.commit()
+    db.refresh(current_user)
+
+    log_audit(
+        db=db,
+        actor_id=current_user.id,
+        action="user_updated_profile",
+        target_type="user",
+        target_id=current_user.id,
+        details={"full_name": current_user.full_name},
+    )
+
+    return {
+        "id": str(current_user.id),
+        "email": current_user.email,
+        "full_name": current_user.full_name,
+        "role": current_user.role,
+    }
+

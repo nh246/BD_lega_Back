@@ -349,11 +349,12 @@ def seed_database():
         ]
 
         for lawyer_id, s_date, start_t, end_t, is_b in slots_def:
+            parsed_s_date = datetime.strptime(s_date, "%Y-%m-%d").date()
             slot = (
                 db.query(Schedule)
                 .filter(
                     Schedule.lawyer_id == lawyer_id,
-                    Schedule.date == s_date,
+                    Schedule.date == parsed_s_date,
                     Schedule.start_time == start_t,
                 )
                 .first()
@@ -362,7 +363,7 @@ def seed_database():
                 slot = Schedule(
                     id=uuid.uuid4(),
                     lawyer_id=lawyer_id,
-                    date=s_date,
+                    date=parsed_s_date,
                     start_time=start_t,
                     end_time=end_t,
                     is_booked=is_b,

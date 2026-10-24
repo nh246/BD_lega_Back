@@ -60,6 +60,9 @@ class LawyerProfile(Base):
     # verification_status: pending | approved | rejected
     verification_status = Column(String(50), default="pending", nullable=False)
     verification_paid = Column(Boolean, default=False, nullable=False)
+    hourly_rate = Column(Integer, default=2000, nullable=True)
+    years_exp = Column(Integer, default=8, nullable=True)
+    languages = Column(String(255), default="Bangla, English", nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Relationships
@@ -88,7 +91,7 @@ class Schedule(Base):
 
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     lawyer_id = Column(Uuid, ForeignKey("lawyer_profiles.id"), nullable=False)
-    date = Column(String(50), nullable=False)
+    date = Column(Date, nullable=False)
     start_time = Column(String(50), nullable=False)
     end_time = Column(String(50), nullable=False)
     is_booked = Column(Boolean, default=False, nullable=False)
