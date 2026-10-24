@@ -444,6 +444,7 @@ def get_chat_usage(
     }
 
 
+
 @router.delete("/chat/sessions/{session_id}")
 def delete_chat_session(
     session_id: str,
