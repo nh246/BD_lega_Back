@@ -228,7 +228,7 @@ def get_lawyer_bookings(
         sub.user_id for sub in db.query(Subscription)
         .join(Plan)
         .filter(Subscription.status == "active")
-        .filter(Plan.code == "user_pro")
+        .filter(Plan.code.in_(["user_pro", "user_pro_monthly", "user_pro_6m", "user_pro_1y"]))
         .filter(Subscription.expires_at > datetime.now(timezone.utc))
         .all()
     )

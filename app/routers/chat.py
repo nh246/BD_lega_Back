@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_role
 from app.core.plans import get_user_plan
-from app.models import ChatMessage, ChatSession, DailyUsage, Document, LlmConfig, User
+from app.models import ChatMessage, ChatSession, MonthlyUsage, Document, LlmConfig, User
 from app.schemas import (
     ChatMessageCreate,
     ChatMessageResponse,
@@ -111,57 +111,52 @@ def send_chat_message(
                 "data": bytes(img.file_bytes),
             })
 
-    today_utc = datetime.now(timezone.utc).date()
-    daily_row = (
-        db.query(DailyUsage)
-        .filter(DailyUsage.user_id == current_user.id, DailyUsage.day == today_utc)
+    now_utc = datetime.now(timezone.utc)
+    current_year = now_utc.year
+    current_month = now_utc.month
+
+    monthly_row = (
+        db.query(MonthlyUsage)
+        .filter(
+            MonthlyUsage.user_id == current_user.id,
+            MonthlyUsage.year == current_year,
+            MonthlyUsage.month == current_month,
+        )
         .first()
     )
-    if not daily_row:
-        daily_row = DailyUsage(
+    if not monthly_row:
+        monthly_row = MonthlyUsage(
             user_id=current_user.id,
-            day=today_utc,
+            year=current_year,
+            month=current_month,
             messages_used=0,
         )
-        db.add(daily_row)
+        db.add(monthly_row)
         try:
             db.commit()
-            db.refresh(daily_row)
+            db.refresh(monthly_row)
         except Exception:
             db.rollback()
-            daily_row = (
-                db.query(DailyUsage)
-                .filter(DailyUsage.user_id == current_user.id, DailyUsage.day == today_utc)
+            monthly_row = (
+                db.query(MonthlyUsage)
+                .filter(
+                    MonthlyUsage.user_id == current_user.id,
+                    MonthlyUsage.year == current_year,
+                    MonthlyUsage.month == current_month,
+                )
                 .first()
             )
 
     if plan == "user_free":
-        if daily_row and daily_row.messages_used >= 10:
+        if monthly_row and monthly_row.messages_used >= 15:
             return JSONResponse(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
                 content={
                     "error": "free_limit",
-                    "message": "Daily free limit reached (10 messages). Upgrade to Pro for unlimited queries.",
+                    "message": "Monthly free limit reached (15 messages). Upgrade to Pro.",
                 },
             )
-
-        # b) If the request has no session_id: count ChatSession rows of current_user.
-        if not payload.session_id:
-            session_count = (
-                db.query(ChatSession)
-                .filter(ChatSession.user_id == current_user.id)
-                .count()
-            )
-            if session_count >= 3:
-                return JSONResponse(
-                    status_code=status.HTTP_402_PAYMENT_REQUIRED,
-                    content={
-                        "error": "free_sessions",
-                        "message": "Free plan allows 3 saved sessions. Upgrade to Pro for unlimited sessions.",
-                    },
-                )
-
-        k = 5
+        k = 3
     else:
         k = 20
 
@@ -308,8 +303,8 @@ def send_chat_message(
     )
     db.add(user_msg)
     db.add(assistant_msg)
-    if daily_row:
-        daily_row.messages_used += 1
+    if monthly_row:
+        monthly_row.messages_used += 1
     db.commit()
     db.refresh(assistant_msg)
 
@@ -325,6 +320,7 @@ def send_chat_message(
         message=reply_text,
         confidence=confidence,
         confidence_reason=reason,
+        context_window=k,
     )
 
 
@@ -411,13 +407,20 @@ def get_chat_usage(
     plan = get_user_plan(db, current_user)
     is_free = (plan == "user_free")
 
-    today_utc = datetime.now(timezone.utc).date()
-    daily_row = (
-        db.query(DailyUsage)
-        .filter(DailyUsage.user_id == current_user.id, DailyUsage.day == today_utc)
+    now_utc = datetime.now(timezone.utc)
+    current_year = now_utc.year
+    current_month = now_utc.month
+
+    monthly_row = (
+        db.query(MonthlyUsage)
+        .filter(
+            MonthlyUsage.user_id == current_user.id,
+            MonthlyUsage.year == current_year,
+            MonthlyUsage.month == current_month,
+        )
         .first()
     )
-    messages_today = daily_row.messages_used if daily_row else 0
+    messages_this_month = monthly_row.messages_used if monthly_row else 0
 
     sessions_used = (
         db.query(ChatSession)
@@ -425,12 +428,19 @@ def get_chat_usage(
         .count()
     )
 
+    monthly_limit = 15 if is_free else None
+    context_window = 3 if is_free else 20
+
     return {
         "plan": plan,
-        "messages_today": messages_today,
-        "daily_limit": 10 if is_free else None,
+        "messages_this_month": messages_this_month,
+        "monthly_limit": monthly_limit,
+        "limit": monthly_limit,
+        "context_window": context_window,
+        "messages_today": messages_this_month,
+        "daily_limit": monthly_limit,
         "sessions_used": sessions_used,
-        "session_limit": 3 if is_free else None,
+        "session_limit": None,
     }
 
 

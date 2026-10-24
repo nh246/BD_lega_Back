@@ -172,10 +172,11 @@ class Plan(Base):
     __tablename__ = "plans"
 
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
-    # code: user_free | user_pro | lawyer_basic | lawyer_verified
+    # code: user_free | user_pro_monthly | user_pro_6m | user_pro_1y | lawyer_basic | lawyer_verified
     code = Column(String(100), unique=True, index=True, nullable=False)
     name = Column(String(255), nullable=False)
     price_monthly = Column(Float, default=0.0, nullable=False)
+    duration_days = Column(Integer, default=30, nullable=True)
     features = Column(JSON, nullable=True)
 
     @property
@@ -278,20 +279,25 @@ class Document(Base):
     owner = relationship("User", foreign_keys=[owner_user_id])
 
 
-class DailyUsage(Base):
-    __tablename__ = "daily_usage"
+class MonthlyUsage(Base):
+    __tablename__ = "monthly_usages"
 
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id = Column(Uuid, ForeignKey("users.id"), nullable=False)
-    day = Column(Date, nullable=False)
+    year = Column(Integer, nullable=False)
+    month = Column(Integer, nullable=False)
     messages_used = Column(Integer, default=0, nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("user_id", "day", name="uq_daily_usage_user_day"),
+        UniqueConstraint("user_id", "year", "month", name="uq_monthly_usage_user_year_month"),
     )
 
     # Relationships
     user = relationship("User", foreign_keys=[user_id])
+
+
+# Backward-compatibility alias
+DailyUsage = MonthlyUsage
 
 
 class ProfileAsset(Base):

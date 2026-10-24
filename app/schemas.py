@@ -342,6 +342,7 @@ class ChatResponse(BaseModel):
     message: Optional[str] = None
     confidence: Optional[int] = None
     confidence_reason: Optional[str] = None
+    context_window: Optional[int] = None
 
     @model_validator(mode="after")
     def populate_aliases(self):
@@ -469,6 +470,7 @@ class PlanResponse(BaseModel):
     name: str
     price_monthly: float
     features: List[str]
+    duration_days: Optional[int] = None
     price: Optional[Any] = None
     target_role: Optional[str] = "user"
     description: Optional[str] = None
@@ -493,14 +495,18 @@ class PlanResponse(BaseModel):
         if not self.description:
             if self.code == "user_free":
                 self.description = "Essential legal AI guidance and lawyer search for everyday citizens."
-            elif self.code == "user_pro":
+            elif self.code in ["user_pro", "user_pro_monthly"]:
                 self.description = "Deep legal intelligence with BD Penal Code citations & document review."
+            elif self.code == "user_pro_6m":
+                self.description = "Pro features with 6-month continuous access and savings."
+            elif self.code == "user_pro_1y":
+                self.description = "Full Pro access for 1 year with maximum savings."
             elif self.code == "lawyer_basic":
                 self.description = "Standard listing in the Bangladesh lawyer directory & consultation requests."
             elif self.code == "lawyer_verified":
                 self.description = "Verified Bar Council badge, priority placement & video meeting suite."
         if not self.popular:
-            if self.code in ["user_pro", "lawyer_verified"]:
+            if self.code in ["user_pro", "user_pro_monthly", "lawyer_verified"]:
                 self.popular = True
         return self
 

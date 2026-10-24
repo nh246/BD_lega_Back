@@ -57,19 +57,51 @@ app.include_router(assets_router)
 @app.on_event("startup")
 def on_startup():
     """Create all core database tables on application startup and ensure schema migrations."""
+    # 1. Drop old daily usage tables if present
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS daily_usages CASCADE"))
+            conn.execute(text("DROP TABLE IF EXISTS daily_usage CASCADE"))
+            conn.commit()
+    except Exception:
+        pass
+
+    # 2. Create newly registered models (including monthly_usages)
     Base.metadata.create_all(bind=engine)
+
+    # 3. Column migrations
     try:
         from sqlalchemy import inspect
         inspector = inspect(engine)
-        cols = [c['name'] for c in inspector.get_columns('lawyer_profiles')]
-        with engine.connect() as conn:
-            if 'hourly_rate' not in cols:
-                conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN hourly_rate INTEGER DEFAULT 2000"))
-            if 'years_exp' not in cols:
-                conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN years_exp INTEGER DEFAULT 8"))
-            if 'languages' not in cols:
-                conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN languages VARCHAR(255) DEFAULT 'Bangla, English'"))
-            conn.commit()
+        if inspector.has_table('lawyer_profiles'):
+            cols = [c['name'] for c in inspector.get_columns('lawyer_profiles')]
+            with engine.connect() as conn:
+                if 'hourly_rate' not in cols:
+                    conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN hourly_rate INTEGER DEFAULT 2000"))
+                if 'years_exp' not in cols:
+                    conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN years_exp INTEGER DEFAULT 8"))
+                if 'languages' not in cols:
+                    conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN languages VARCHAR(255) DEFAULT 'Bangla, English'"))
+                conn.commit()
+
+        if inspector.has_table('plans'):
+            plan_cols = [c['name'] for c in inspector.get_columns('plans')]
+            with engine.connect() as conn:
+                if 'duration_days' not in plan_cols:
+                    conn.execute(text("ALTER TABLE plans ADD COLUMN duration_days INTEGER DEFAULT 30"))
+                    conn.commit()
+    except Exception:
+        pass
+
+    # 4. Ensure exact plans exist
+    try:
+        from app.core.database import SessionLocal
+        from app.core.plans import ensure_plans_exist
+        db = SessionLocal()
+        try:
+            ensure_plans_exist(db)
+        finally:
+            db.close()
     except Exception:
         pass
 

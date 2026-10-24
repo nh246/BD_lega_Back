@@ -21,6 +21,9 @@ from app.core.plans import get_user_plan
 router = APIRouter(prefix="/api/auth", tags=["Auth"])
 
 
+from app.core.plans import get_user_plan, is_pro_plan
+
+
 def _make_user_response(db: Session, user: User) -> UserResponse:
     user_plan = get_user_plan(db, user)
     return UserResponse(
@@ -31,7 +34,7 @@ def _make_user_response(db: Session, user: User) -> UserResponse:
         status=user.status,
         scopes=user.scopes or [],
         plan=user_plan,
-        is_pro=(user_plan == "user_pro"),
+        is_pro=is_pro_plan(user_plan),
     )
 
 

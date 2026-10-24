@@ -83,8 +83,10 @@ def seed_demo_accounts():
         print("=== Seeding BD Legal Guide AI Demo Accounts ===")
 
         # 1. Fetch or create plans
+        from app.core.plans import ensure_plans_exist
+        ensure_plans_exist(db)
         user_free_plan = db.query(Plan).filter(Plan.code == "user_free").first()
-        user_pro_plan = db.query(Plan).filter(Plan.code == "user_pro").first()
+        user_pro_plan = db.query(Plan).filter(Plan.code.in_(["user_pro_monthly", "user_pro"])).first()
         lawyer_basic_plan = db.query(Plan).filter(Plan.code == "lawyer_basic").first()
         lawyer_verified_plan = db.query(Plan).filter(Plan.code == "lawyer_verified").first()
 

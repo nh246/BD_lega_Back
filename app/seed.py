@@ -51,17 +51,64 @@ def seed_database():
                 "code": "user_free",
                 "name": "Free Plan",
                 "price_monthly": 0.0,
+                "duration_days": None,
                 "features": [
-                    "Standard Gemini AI Chat",
+                    "Standard Gemini AI Chat (15 msgs/mo)",
+                    "3-turn chat memory",
                     "Browse Lawyer Directory",
                     "Book Consultations",
                     "Basic Session History",
                 ],
             },
             {
+                "code": "user_pro_monthly",
+                "name": "Pro Monthly",
+                "price_monthly": 299.0,
+                "duration_days": 30,
+                "features": [
+                    "Standard Gemini AI Chat (Unlimited)",
+                    "20-turn chat memory",
+                    "Direct messaging with verified lawyers",
+                    "Browse Lawyer Directory",
+                    "Book Consultations",
+                    "Basic Session History",
+                    "RAG-Verified Citations (BD Penal Code)",
+                    "Document Analysis (PDF/Docx)",
+                    "Priority Lawyer Matching",
+                ],
+            },
+            {
+                "code": "user_pro_6m",
+                "name": "Pro 6 Months",
+                "price_monthly": 1499.0,
+                "duration_days": 180,
+                "features": [
+                    "All Pro features for 6 months",
+                    "Standard Gemini AI Chat (Unlimited)",
+                    "20-turn chat memory",
+                    "Direct messaging with verified lawyers",
+                    "Priority Lawyer Matching",
+                ],
+            },
+            {
+                "code": "user_pro_1y",
+                "name": "Pro 1 Year",
+                "price_monthly": 2499.0,
+                "duration_days": 365,
+                "features": [
+                    "All Pro features for 1 full year",
+                    "Standard Gemini AI Chat (Unlimited)",
+                    "20-turn chat memory",
+                    "Direct messaging with verified lawyers",
+                    "Priority Lawyer Matching",
+                    "Maximum savings",
+                ],
+            },
+            {
                 "code": "user_pro",
                 "name": "Pro Plan",
                 "price_monthly": 299.0,
+                "duration_days": 30,
                 "features": [
                     "Standard Gemini AI Chat",
                     "Browse Lawyer Directory",
@@ -77,6 +124,7 @@ def seed_database():
                 "code": "lawyer_basic",
                 "name": "Lawyer Basic",
                 "price_monthly": 0.0,
+                "duration_days": None,
                 "features": [
                     "Directory Listing",
                     "Receive Consultation Requests",
@@ -87,6 +135,7 @@ def seed_database():
                 "code": "lawyer_verified",
                 "name": "Lawyer Verified Badge",
                 "price_monthly": 999.0,
+                "duration_days": None,
                 "features": [
                     "Bar Council Verified Badge",
                     "Priority Search & Directory Ranking",
@@ -106,6 +155,7 @@ def seed_database():
                     code=p["code"],
                     name=p["name"],
                     price_monthly=p["price_monthly"],
+                    duration_days=p.get("duration_days"),
                     features=p["features"],
                 )
                 db.add(new_plan)
@@ -113,6 +163,11 @@ def seed_database():
                 plans_map[p["code"]] = new_plan
                 print(f" [+] Plan created: {p['code']} ({p['name']})")
             else:
+                existing_plan.name = p["name"]
+                existing_plan.price_monthly = p["price_monthly"]
+                if hasattr(existing_plan, "duration_days"):
+                    existing_plan.duration_days = p.get("duration_days")
+                existing_plan.features = p["features"]
                 plans_map[p["code"]] = existing_plan
                 print(f" [.] Plan exists: {p['code']}")
 
