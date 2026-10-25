@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user, get_optional_current_user
-from app.models import LawyerProfile, ProfileAsset, User
+from app.models import Booking, LawyerProfile, ProfileAsset, User
 
 router = APIRouter(tags=["Assets"])
 
@@ -31,6 +31,30 @@ VERIFICATION_MIMES = {
     "png": "image/png",
     "jpg": "image/jpeg",
     "jpeg": "image/jpeg",
+}
+
+PAYMENT_SCREENSHOT_ALLOWED_EXTS = {"png", "jpg", "jpeg", "webp"}
+PAYMENT_SCREENSHOT_MIMES = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+}
+
+ATTACHMENT_TEXT_EXTS = {"pdf", "txt", "doc", "docx"}
+ATTACHMENT_TEXT_MIMES = {
+    "pdf": "application/pdf",
+    "txt": "text/plain",
+    "doc": "application/msword",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
+ATTACHMENT_IMAGE_EXTS = {"png", "jpg", "jpeg", "webp"}
+ATTACHMENT_IMAGE_MIMES = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
 }
 
 
@@ -77,14 +101,15 @@ async def upload_profile_asset(
     db: Session = Depends(get_db),
 ):
     """
-    Upload a profile asset (kind: 'avatar' or 'verification').
+    Upload a profile asset (kind: 'avatar', 'verification', or 'payment_screenshot').
     - 'avatar': images only (png/jpg/jpeg/webp), max 1 MB. Replaces previous avatar.
     - 'verification': pdf/png/jpg/jpeg, max 2 MB. Max 3 verification docs per user.
+    - 'payment_screenshot': images only (png/jpg/jpeg/webp), max 2 MB. No count limit.
     """
-    if kind not in ("avatar", "verification"):
+    if kind not in ("avatar", "verification", "payment_screenshot", "text", "image"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid asset kind. Must be 'avatar' or 'verification'.",
+            detail="Invalid asset kind. Must be 'avatar', 'verification', 'payment_screenshot', 'text', or 'image'.",
         )
 
     if not file or not file.filename:
@@ -128,6 +153,59 @@ async def upload_profile_asset(
             ProfileAsset.kind == "avatar",
         ).delete()
         db.commit()
+
+    elif kind == "payment_screenshot":
+        if ext not in PAYMENT_SCREENSHOT_ALLOWED_EXTS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid file type for payment screenshot. Allowed types: png, jpg, jpeg, webp.",
+            )
+        if (
+            content_type
+            and content_type != "application/octet-stream"
+            and not (content_type.startswith("image/") or content_type in PAYMENT_SCREENSHOT_MIMES.values())
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid MIME type for payment screenshot. Must be an image.",
+            )
+
+        content_bytes = await file.read()
+        if len(content_bytes) > 2 * 1024 * 1024:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Payment screenshot exceeds maximum limit of 2 MB.",
+            )
+
+        mime_type = PAYMENT_SCREENSHOT_MIMES.get(ext) or content_type or "image/png"
+
+    elif kind == "text":
+        if ext not in ATTACHMENT_TEXT_EXTS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid file type for text attachment. Allowed: {', '.join(sorted(ATTACHMENT_TEXT_EXTS))}",
+            )
+        content_bytes = await file.read()
+        if len(content_bytes) > 2 * 1024 * 1024:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Attachment exceeds maximum limit of 2 MB.",
+            )
+        mime_type = ATTACHMENT_TEXT_MIMES.get(ext) or content_type or "text/plain"
+
+    elif kind == "image":
+        if ext not in ATTACHMENT_IMAGE_EXTS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid file type for image attachment. Allowed: {', '.join(sorted(ATTACHMENT_IMAGE_EXTS))}",
+            )
+        content_bytes = await file.read()
+        if len(content_bytes) > 2 * 1024 * 1024:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Attachment exceeds maximum limit of 2 MB.",
+            )
+        mime_type = ATTACHMENT_IMAGE_MIMES.get(ext) or content_type or "image/png"
 
     else:  # kind == "verification"
         if ext not in VERIFICATION_ALLOWED_EXTS:
@@ -308,12 +386,93 @@ def get_asset_file(
             detail="Asset not found",
         )
 
-    if asset.kind == "avatar":
+    # Check if this asset is attached to any DirectMessage between user A and lawyer B
+    from app.models import DirectMessage
+    from sqlalchemy import cast, String
+
+    dm_matches = (
+        db.query(DirectMessage)
+        .filter(cast(DirectMessage.attachments, String).like(f"%{asset.id}%"))
+        .all()
+    )
+
+    is_dm_attachment = False
+    is_dm_authorized = False
+
+    if dm_matches:
+        for dm in dm_matches:
+            att_list = dm.attachments or []
+            if str(asset.id) in [str(x) for x in att_list]:
+                is_dm_attachment = True
+                if requester:
+                    if requester.role in ["admin", "moderator"]:
+                        is_dm_authorized = True
+                        break
+                    lawyer_user_id = None
+                    if dm.lawyer_profile:
+                        lawyer_user_id = dm.lawyer_profile.user_id
+                    else:
+                        lp = db.query(LawyerProfile).filter(LawyerProfile.id == dm.lawyer_profile_id).first()
+                        if lp:
+                            lawyer_user_id = lp.user_id
+
+                    allowed_users = {dm.sender_user_id, dm.recipient_user_id, lawyer_user_id}
+                    allowed_users.discard(None)
+                    if requester.id in allowed_users:
+                        is_dm_authorized = True
+                        break
+
+    if is_dm_attachment:
+        if not is_dm_authorized:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Asset not found",
+            )
+    elif asset.kind == "avatar":
         # Avatars are public
         pass
     elif asset.kind == "verification":
         if not _check_verification_access(db, asset.owner_user_id, requester):
             # Violation -> 404 (do not reveal existence)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Asset not found",
+            )
+    elif asset.kind == "payment_screenshot":
+        if not requester:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Asset not found",
+            )
+        is_owner = requester.id == asset.owner_user_id
+        is_staff = requester.role in ["admin", "moderator"]
+        is_assigned_lawyer = False
+        if requester.role == "lawyer":
+            lawyer_prof = db.query(LawyerProfile).filter(LawyerProfile.user_id == requester.id).first()
+            if lawyer_prof:
+                is_assigned_lawyer = (
+                    db.query(Booking)
+                    .filter(
+                        Booking.screenshot_asset_id == asset.id,
+                        Booking.lawyer_id == lawyer_prof.id,
+                    )
+                    .first()
+                    is not None
+                )
+        if not (is_owner or is_staff or is_assigned_lawyer):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Asset not found",
+            )
+    elif asset.kind in ("text", "image"):
+        if not requester:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Asset not found",
+            )
+        is_owner = requester.id == asset.owner_user_id
+        is_staff = requester.role in ["admin", "moderator"]
+        if not (is_owner or is_staff):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Asset not found",

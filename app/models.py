@@ -63,6 +63,10 @@ class LawyerProfile(Base):
     hourly_rate = Column(Integer, default=2000, nullable=True)
     years_exp = Column(Integer, default=8, nullable=True)
     languages = Column(String(255), default="Bangla, English", nullable=True)
+    payment_methods = Column(JSON, nullable=True, default=list)
+    payment_instructions = Column(Text, nullable=True)
+    meeting_provider = Column(String(100), nullable=True)
+    meeting_link = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Relationships
@@ -108,14 +112,26 @@ class Booking(Base):
     user_id = Column(Uuid, ForeignKey("users.id"), nullable=False)
     lawyer_id = Column(Uuid, ForeignKey("lawyer_profiles.id"), nullable=False)
     schedule_id = Column(Uuid, ForeignKey("schedules.id"), unique=True, nullable=False)
-    # status: pending | confirmed | cancelled
+    # status: pending | awaiting_payment | payment_submitted | confirmed | completion_requested | completed | cancelled | expired | refund_due
     status = Column(String(50), default="pending", nullable=False)
+    trx_id = Column(String(255), nullable=True)
+    screenshot_asset_id = Column(Uuid, ForeignKey("profile_assets.id", ondelete="SET NULL"), nullable=True)
+    meeting_link = Column(String(500), nullable=True)
+    meeting_started_at = Column(DateTime, nullable=True)
+    meeting_ended_at = Column(DateTime, nullable=True)
+    extended_minutes = Column(Integer, default=0, nullable=False)
+    completion_requested_at = Column(DateTime(timezone=True), nullable=True)
+    completion_requested_by = Column(String(50), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    case_brief = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Relationships
     user = relationship("User", back_populates="bookings", foreign_keys=[user_id])
     lawyer = relationship("LawyerProfile", back_populates="bookings", foreign_keys=[lawyer_id])
     schedule = relationship("Schedule", back_populates="booking")
+    screenshot_asset = relationship("ProfileAsset", foreign_keys=[screenshot_asset_id])
+    review = relationship("Review", back_populates="booking", uselist=False, cascade="all, delete-orphan")
 
 
 class ChatSession(Base):
@@ -252,6 +268,7 @@ class DirectMessage(Base):
     lawyer_profile_id = Column(Uuid, ForeignKey("lawyer_profiles.id"), nullable=False)
     recipient_user_id = Column(Uuid, ForeignKey("users.id"), nullable=True)
     content = Column(Text, nullable=False)
+    attachments = Column(JSON, nullable=True, default=[])
     is_read = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -316,4 +333,76 @@ class ProfileAsset(Base):
     owner = relationship("User", foreign_keys=[owner_user_id])
 
 
+class Review(Base):
+    __tablename__ = "reviews"
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    booking_id = Column(Uuid, ForeignKey("bookings.id"), unique=True, nullable=False)
+    reviewer_id = Column(Uuid, ForeignKey("users.id"), nullable=False)
+    reviewee_id = Column(Uuid, ForeignKey("users.id"), nullable=False)
+    rating = Column(Integer, nullable=False)
+    comment = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+    # Relationships
+    booking = relationship("Booking", back_populates="review")
+    reviewer = relationship("User", foreign_keys=[reviewer_id])
+    reviewee = relationship("User", foreign_keys=[reviewee_id])
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id = Column(Uuid, ForeignKey("users.id"), nullable=False)
+    type = Column(String(50), nullable=False)
+    title = Column(String(255), nullable=False)
+    message = Column(Text, nullable=False)
+    link = Column(String(255), nullable=True)
+    is_read = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+    # Relationships
+    user = relationship("User", foreign_keys=[user_id])
+
+    __table_args__ = (
+        Index("ix_notifications_user_is_read_created_at", "user_id", "is_read", "created_at"),
+    )
+
+
+class CasePost(Base):
+    __tablename__ = "case_posts"
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id = Column(Uuid, ForeignKey("users.id"), nullable=False)
+    title = Column(String(100), nullable=False)
+    category = Column(String(100), nullable=False)
+    description = Column(Text, nullable=False)
+    status = Column(String(50), default="open", nullable=False)  # "open", "assigned", "closed"
+    attachment_asset_ids = Column(JSON, default=list, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+    # Relationships
+    user = relationship("User", foreign_keys=[user_id])
+    bids = relationship("CaseBid", back_populates="case_post", cascade="all, delete-orphan", order_by="CaseBid.created_at.desc()")
+
+
+class CaseBid(Base):
+    __tablename__ = "case_bids"
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    case_id = Column(Uuid, ForeignKey("case_posts.id"), nullable=False)
+    lawyer_profile_id = Column(Uuid, ForeignKey("lawyer_profiles.id"), nullable=False)
+    proposed_fee = Column(Integer, nullable=False)
+    pitch_message = Column(Text, nullable=False)
+    status = Column(String(50), default="pending", nullable=False)  # "pending", "accepted", "rejected"
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("case_id", "lawyer_profile_id", name="uq_case_lawyer_bid"),
+    )
+
+    # Relationships
+    case_post = relationship("CasePost", back_populates="bids")
+    lawyer_profile = relationship("LawyerProfile", foreign_keys=[lawyer_profile_id])
 

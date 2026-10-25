@@ -22,6 +22,9 @@ from app.routers.payments import router as payment_router
 from app.routers.messages import router as messages_router, compat_router as messages_compat_router
 from app.routers.documents import router as documents_router
 from app.routers.assets import router as assets_router
+from app.routers.reviews import router as reviews_router
+from app.routers.notifications import router as notifications_router, compat_router as notifications_compat_router
+from app.routers.cases import router as cases_router
 
 app = FastAPI(title="BD Legal Guide AI API")
 
@@ -51,6 +54,11 @@ app.include_router(messages_router)
 app.include_router(messages_compat_router)
 app.include_router(documents_router)
 app.include_router(assets_router)
+app.include_router(reviews_router)
+app.include_router(notifications_router)
+app.include_router(notifications_compat_router)
+app.include_router(cases_router)
+
 
 
 
@@ -82,6 +90,39 @@ def on_startup():
                     conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN years_exp INTEGER DEFAULT 8"))
                 if 'languages' not in cols:
                     conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN languages VARCHAR(255) DEFAULT 'Bangla, English'"))
+                if 'payment_methods' not in cols:
+                    conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN payment_methods JSON DEFAULT '[]'::json"))
+                if 'payment_instructions' not in cols:
+                    conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN payment_instructions TEXT"))
+                if 'meeting_provider' not in cols:
+                    conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN meeting_provider VARCHAR(100)"))
+                if 'meeting_link' not in cols:
+                    conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN meeting_link VARCHAR(500)"))
+                conn.commit()
+
+        if inspector.has_table('bookings'):
+            booking_cols = [c['name'] for c in inspector.get_columns('bookings')]
+            with engine.connect() as conn:
+                if 'trx_id' not in booking_cols:
+                    conn.execute(text("ALTER TABLE bookings ADD COLUMN trx_id VARCHAR(255)"))
+                if 'screenshot_asset_id' not in booking_cols:
+                    conn.execute(text("ALTER TABLE bookings ADD COLUMN screenshot_asset_id UUID REFERENCES profile_assets(id) ON DELETE SET NULL"))
+                if 'meeting_link' not in booking_cols:
+                    conn.execute(text("ALTER TABLE bookings ADD COLUMN meeting_link VARCHAR(500)"))
+                if 'meeting_started_at' not in booking_cols:
+                    conn.execute(text("ALTER TABLE bookings ADD COLUMN meeting_started_at TIMESTAMP WITH TIME ZONE"))
+                if 'meeting_ended_at' not in booking_cols:
+                    conn.execute(text("ALTER TABLE bookings ADD COLUMN meeting_ended_at TIMESTAMP WITH TIME ZONE"))
+                if 'extended_minutes' not in booking_cols:
+                    conn.execute(text("ALTER TABLE bookings ADD COLUMN extended_minutes INTEGER DEFAULT 0"))
+                if 'completion_requested_at' not in booking_cols:
+                    conn.execute(text("ALTER TABLE bookings ADD COLUMN completion_requested_at TIMESTAMP WITH TIME ZONE"))
+                if 'completion_requested_by' not in booking_cols:
+                    conn.execute(text("ALTER TABLE bookings ADD COLUMN completion_requested_by VARCHAR(50)"))
+                if 'completed_at' not in booking_cols:
+                    conn.execute(text("ALTER TABLE bookings ADD COLUMN completed_at TIMESTAMP WITH TIME ZONE"))
+                if 'case_brief' not in booking_cols:
+                    conn.execute(text("ALTER TABLE bookings ADD COLUMN case_brief TEXT"))
                 conn.commit()
 
         if inspector.has_table('plans'):
@@ -89,7 +130,14 @@ def on_startup():
             with engine.connect() as conn:
                 if 'duration_days' not in plan_cols:
                     conn.execute(text("ALTER TABLE plans ADD COLUMN duration_days INTEGER DEFAULT 30"))
-                    conn.commit()
+                conn.commit()
+
+        if inspector.has_table('direct_messages'):
+            dm_cols = [c['name'] for c in inspector.get_columns('direct_messages')]
+            with engine.connect() as conn:
+                if 'attachments' not in dm_cols:
+                    conn.execute(text("ALTER TABLE direct_messages ADD COLUMN attachments JSON DEFAULT '[]'::json"))
+                conn.commit()
     except Exception:
         pass
 

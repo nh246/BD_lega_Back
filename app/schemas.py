@@ -108,6 +108,9 @@ class LawyerListResponse(BaseModel):
     hourly_rate: Optional[int] = 2000
     years_exp: Optional[int] = 8
     languages: Optional[str] = "Bangla, English"
+    presence_status: Optional[str] = "available"
+    avg_rating: Optional[float] = None
+    review_count: Optional[int] = 0
 
     @field_validator("id", mode="before")
     @classmethod
@@ -124,8 +127,32 @@ class LawyerListResponse(BaseModel):
         return str(v) if v is not None else None
 
 
+class LawyerPaymentSettingsUpdate(BaseModel):
+    payment_methods: List[Dict[str, Any]] = []
+    payment_instructions: Optional[str] = None
+
+
+class LawyerPaymentInfoResponse(BaseModel):
+    payment_methods: List[Dict[str, Any]] = []
+    payment_instructions: Optional[str] = None
+
+
+class LawyerMeetingSettingsUpdate(BaseModel):
+    meeting_provider: Optional[str] = None
+    meeting_link: Optional[str] = None
+
+
+class LawyerMeetingInfoResponse(BaseModel):
+    meeting_provider: Optional[str] = None
+    meeting_link: Optional[str] = None
+
+
 class LawyerResponse(LawyerListResponse):
     phone: Optional[str] = None
+    payment_methods: Optional[List[Dict[str, Any]]] = None
+    payment_instructions: Optional[str] = None
+    meeting_provider: Optional[str] = None
+    meeting_link: Optional[str] = None
 
 
 class LawyerUpdate(BaseModel):
@@ -216,12 +243,30 @@ class BookingResponse(BaseModel):
     date: Optional[str] = None
     start_time: Optional[str] = None
     end_time: Optional[str] = None
+    trx_id: Optional[str] = None
+    screenshot_asset_id: Optional[str] = None
+    meeting_link: Optional[str] = None
+    meeting_started_at: Optional[str] = None
+    meeting_ended_at: Optional[str] = None
+    extended_minutes: Optional[int] = 0
+    completion_requested_at: Optional[str] = None
+    completion_requested_by: Optional[str] = None
+    completed_at: Optional[str] = None
+    case_brief: Optional[str] = None
+    has_reviewed: Optional[bool] = False
 
     @field_validator("id", "user_id", "lawyer_id", "schedule_id", mode="before")
     @classmethod
     def serialize_uuid(cls, v):
         if v is None:
             return ""
+        return str(v)
+
+    @field_validator("screenshot_asset_id", mode="before")
+    @classmethod
+    def serialize_screenshot_asset_id(cls, v):
+        if v is None:
+            return None
         return str(v)
 
     @field_validator("created_at", mode="before")
@@ -242,6 +287,12 @@ class BookingResponse(BaseModel):
                 s_date = str(s_date)
             data["schedule_date"] = s_date
             data["date"] = s_date
+            for dt_field in ["completion_requested_at", "completed_at"]:
+                v = data.get(dt_field)
+                if hasattr(v, "isoformat"):
+                    data[dt_field] = v.isoformat()
+                elif v is not None:
+                    data[dt_field] = str(v)
             return data
 
         lawyer_name = None
@@ -290,6 +341,47 @@ class BookingResponse(BaseModel):
             "date": date_val,
             "start_time": start_time_val,
             "end_time": end_time_val,
+            "trx_id": getattr(data, "trx_id", None),
+            "screenshot_asset_id": (
+                str(getattr(data, "screenshot_asset_id"))
+                if getattr(data, "screenshot_asset_id", None) is not None
+                else None
+            ),
+            "meeting_link": getattr(data, "meeting_link", None) or getattr(data, "meet_link", None),
+            "meeting_started_at": (
+                getattr(data, "meeting_started_at").isoformat()
+                if getattr(data, "meeting_started_at", None) and hasattr(getattr(data, "meeting_started_at"), "isoformat")
+                else (str(getattr(data, "meeting_started_at")) if getattr(data, "meeting_started_at", None) else None)
+            ),
+            "meeting_ended_at": (
+                getattr(data, "meeting_ended_at").isoformat()
+                if getattr(data, "meeting_ended_at", None) and hasattr(getattr(data, "meeting_ended_at"), "isoformat")
+                else (str(getattr(data, "meeting_ended_at")) if getattr(data, "meeting_ended_at", None) else None)
+            ),
+            "extended_minutes": getattr(data, "extended_minutes", 0) or 0,
+            "completion_requested_at": (
+                getattr(data, "completion_requested_at").isoformat()
+                if getattr(data, "completion_requested_at", None) and hasattr(getattr(data, "completion_requested_at"), "isoformat")
+                else (str(getattr(data, "completion_requested_at")) if getattr(data, "completion_requested_at", None) else None)
+            ),
+            "completion_requested_by": (
+                data.get("completion_requested_by") if isinstance(data, dict) else getattr(data, "completion_requested_by", None)
+            ),
+            "completed_at": (
+                getattr(data, "completed_at").isoformat()
+                if getattr(data, "completed_at", None) and hasattr(getattr(data, "completed_at"), "isoformat")
+                else (str(getattr(data, "completed_at")) if getattr(data, "completed_at", None) else None)
+            ),
+            "has_reviewed": bool(
+                data.get("has_reviewed", False)
+                if isinstance(data, dict)
+                else (getattr(data, "review", None) is not None or getattr(data, "has_reviewed", False))
+            ),
+            "case_brief": (
+                data.get("case_brief")
+                if isinstance(data, dict)
+                else getattr(data, "case_brief", None)
+            ),
         }
 
 
@@ -311,6 +403,11 @@ class BookingCreate(BaseModel):
 class BookingUpdate(BaseModel):
     status: str
     meet_link: Optional[str] = None
+
+
+class BookingPaymentSubmit(BaseModel):
+    trx_id: str
+    screenshot_asset_id: Optional[str] = None
 
 
 # --- Module 6: Chat & LLM Config Schemas ---
@@ -608,7 +705,8 @@ class CheckoutResponse(BaseModel):
 # --- Direct Messaging Schemas ---
 
 class DirectMessageCreate(BaseModel):
-    content: str = Field(..., min_length=1)
+    content: Optional[str] = ""
+    attachment_asset_ids: Optional[List[str]] = None
 
 
 class DirectMessageResponse(BaseModel):
@@ -619,6 +717,7 @@ class DirectMessageResponse(BaseModel):
     lawyer_profile_id: str
     recipient_user_id: Optional[str] = None
     content: str
+    attachments: Optional[List[str]] = []
     is_read: bool = False
     created_at: str
     sender_name: Optional[str] = None
@@ -647,5 +746,204 @@ class LawyerInboxItem(BaseModel):
     unread_count: int = 0
 
 
+# --- Module: Reviews Schemas ---
+
+class ReviewCreate(BaseModel):
+    booking_id: str
+    rating: int = Field(..., ge=1, le=5)
+    comment: Optional[str] = None
+
+    @field_validator("booking_id", mode="before")
+    @classmethod
+    def serialize_booking_id(cls, v):
+        if isinstance(v, uuid.UUID):
+            return str(v)
+        return str(v) if v is not None else ""
+
+
+class ReviewResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    booking_id: str
+    reviewer_id: str
+    reviewee_id: str
+    rating: int
+    comment: Optional[str] = None
+    created_at: str
+    reviewer_name: Optional[str] = None
+    reviewer_avatar_asset_id: Optional[str] = None
+
+    @field_validator("id", "booking_id", "reviewer_id", "reviewee_id", mode="before")
+    @classmethod
+    def serialize_uuid(cls, v):
+        if v is None:
+            return ""
+        return str(v)
+
+    @field_validator("reviewer_avatar_asset_id", mode="before")
+    @classmethod
+    def serialize_avatar_id(cls, v):
+        if v is None:
+            return None
+        return str(v)
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def serialize_datetime(cls, v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v) if v is not None else ""
+
+
+# --- Module 11: Notification Schemas ---
+
+class NotificationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    user_id: str
+    type: str
+    title: str
+    message: str
+    link: Optional[str] = None
+    is_read: bool = False
+    created_at: str
+
+    @field_validator("id", "user_id", mode="before")
+    @classmethod
+    def serialize_uuid(cls, v):
+        if v is None:
+            return ""
+        return str(v)
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def serialize_datetime(cls, v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v) if v is not None else ""
+
+
+class NotificationListResponse(BaseModel):
+    notifications: List[NotificationResponse]
+    unread_count: int
+
+
+# --- Module 12: Case Board Schemas ---
+
+class CaseBidCreate(BaseModel):
+    proposed_fee: int = Field(..., ge=0, description="Proposed fee in BDT")
+    pitch_message: str = Field(..., min_length=1, description="Pitch to the client")
+
+
+class CaseBidResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    case_id: str
+    lawyer_profile_id: str
+    proposed_fee: int
+    pitch_message: str
+    status: str = "pending"
+    created_at: str
+    lawyer_name: Optional[str] = None
+    lawyer_avatar_asset_id: Optional[str] = None
+    lawyer_avg_rating: Optional[float] = None
+
+    @field_validator("id", "case_id", "lawyer_profile_id", mode="before")
+    @classmethod
+    def serialize_uuid(cls, v):
+        if v is None:
+            return ""
+        return str(v)
+
+    @field_validator("lawyer_avatar_asset_id", mode="before")
+    @classmethod
+    def serialize_avatar(cls, v):
+        if v is None:
+            return None
+        return str(v)
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def serialize_datetime(cls, v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v) if v is not None else ""
+
+
+class CasePostCreate(BaseModel):
+    title: str = Field(..., max_length=100)
+    category: str = Field(..., max_length=100)
+    description: str
+    attachment_asset_ids: Optional[List[Any]] = Field(default_factory=list)
+
+    @field_validator("attachment_asset_ids", mode="before")
+    @classmethod
+    def serialize_attachments(cls, v):
+        if not v:
+            return []
+        return [str(item) for item in v]
+
+
+class CasePostResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    user_id: str
+    title: str
+    category: str
+    description: str
+    status: str = "open"
+    attachment_asset_ids: List[str] = Field(default_factory=list)
+    created_at: str
+    user_name: Optional[str] = None
+    user_avatar_asset_id: Optional[str] = None
+    bids: Optional[List[CaseBidResponse]] = None
+    bid_count: Optional[int] = 0
+
+    @field_validator("id", "user_id", mode="before")
+    @classmethod
+    def serialize_uuid(cls, v):
+        if v is None:
+            return ""
+        return str(v)
+
+    @field_validator("user_avatar_asset_id", mode="before")
+    @classmethod
+    def serialize_avatar(cls, v):
+        if v is None:
+            return None
+        return str(v)
+
+    @field_validator("attachment_asset_ids", mode="before")
+    @classmethod
+    def serialize_attachments(cls, v):
+        if not v:
+            return []
+        return [str(item) for item in v]
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def serialize_datetime(cls, v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v) if v is not None else ""
+
+
+class CaseBidAcceptResponse(BaseModel):
+    message: str
+    booking_id: str
+    case_id: str
+    bid_id: str
+    status: str
+
+
+class CaseBidRejectResponse(BaseModel):
+    message: str
+    case_id: str
+    bid_id: str
+    status: str
 
 

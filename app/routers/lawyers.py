@@ -4,11 +4,20 @@ from typing import List, Optional
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.core.database import get_db
 from app.core.deps import get_optional_current_user, require_scope, require_role
-from app.models import Booking, LawyerProfile, ProfileAsset, Schedule, User
-from app.schemas import LawyerListResponse, LawyerResponse, LawyerUpdate
+from app.models import Booking, LawyerProfile, ProfileAsset, Schedule, User, Review
+from app.schemas import (
+    LawyerListResponse,
+    LawyerMeetingInfoResponse,
+    LawyerMeetingSettingsUpdate,
+    LawyerPaymentInfoResponse,
+    LawyerPaymentSettingsUpdate,
+    LawyerResponse,
+    LawyerUpdate,
+)
 from app.audit import log_audit
 
 router = APIRouter(prefix="/api", tags=["Lawyers"])
@@ -51,98 +60,190 @@ def _can_view_phone(lawyer: LawyerProfile, viewer: Optional[User], db: Session) 
     return has_confirmed
 
 
+def _enrich_lawyers_bulk(
+    lawyers: List[LawyerProfile],
+    db: Session,
+    viewer: Optional[User] = None,
+    allow_phone: bool = False,
+) -> List[LawyerResponse]:
+    """
+    Enriches a list of LawyerProfiles in batch with:
+    - avatar_asset_id from ProfileAsset
+    - next_available slot from Schedule
+    - hourly_rate (fee), years_exp, and languages
+    - presence_status
+    - avg_rating and review_count from Review
+    - phone (permission checked)
+    """
+    if not lawyers:
+        return []
+
+    lawyer_ids = [l.id for l in lawyers]
+    user_ids = [l.user_id for l in lawyers if l.user_id]
+
+    # 1. Bulk Avatars
+    avatar_map = {}
+    if user_ids:
+        avatars = (
+            db.query(ProfileAsset.owner_user_id, ProfileAsset.id)
+            .filter(
+                ProfileAsset.owner_user_id.in_(user_ids),
+                ProfileAsset.kind == "avatar",
+            )
+            .order_by(ProfileAsset.created_at.desc())
+            .all()
+        )
+        for u_id, a_id in avatars:
+            if u_id not in avatar_map:
+                avatar_map[u_id] = str(a_id)
+
+    # 2. Bulk Open Slots for next_available
+    today = datetime.now().date()
+    open_slots = (
+        db.query(Schedule)
+        .filter(
+            Schedule.lawyer_id.in_(lawyer_ids),
+            Schedule.is_booked == False,
+            Schedule.date >= today,
+        )
+        .order_by(Schedule.lawyer_id, Schedule.date.asc(), Schedule.start_time.asc())
+        .all()
+    )
+
+    def _parse_time(t_str: str):
+        try:
+            return datetime.strptime(t_str.strip(), "%I:%M %p").time()
+        except Exception:
+            try:
+                return datetime.strptime(t_str.strip(), "%H:%M").time()
+            except Exception:
+                return datetime.min.time()
+
+    slots_by_lawyer = {}
+    for s in open_slots:
+        slots_by_lawyer.setdefault(s.lawyer_id, []).append(s)
+
+    next_available_map = {}
+    for l_id, slots in slots_by_lawyer.items():
+        min_date = slots[0].date
+        same_date = [s for s in slots if s.date == min_date]
+        best_slot = min(same_date, key=lambda s: _parse_time(s.start_time))
+        date_str = best_slot.date.isoformat() if hasattr(best_slot.date, "isoformat") else str(best_slot.date)
+        next_available_map[l_id] = {
+            "date": date_str,
+            "start_time": best_slot.start_time,
+        }
+
+    # 3. Active meetings presence
+    active_meetings = (
+        db.query(Booking.lawyer_id)
+        .filter(
+            Booking.lawyer_id.in_(lawyer_ids),
+            Booking.meeting_started_at.isnot(None),
+            Booking.meeting_ended_at.is_(None),
+        )
+        .all()
+    )
+    busy_lawyer_ids = {m[0] for m in active_meetings}
+
+    # 4. Review stats
+    review_map = {}
+    if user_ids:
+        review_stats = (
+            db.query(Review.reviewee_id, func.avg(Review.rating), func.count(Review.id))
+            .filter(Review.reviewee_id.in_(user_ids))
+            .group_by(Review.reviewee_id)
+            .all()
+        )
+        for u_id, avg_r, count_r in review_stats:
+            avg_rating = round(float(avg_r), 1) if avg_r is not None else None
+            review_map[u_id] = (avg_rating, count_r or 0)
+
+    # 5. Phone visibility map
+    phone_map = {}
+    if allow_phone:
+        is_staff = viewer and viewer.role in ["admin", "moderator"]
+        confirmed_lawyer_ids = set()
+        if viewer and not is_staff:
+            confirmed_bookings = (
+                db.query(Booking.lawyer_id)
+                .filter(
+                    Booking.user_id == viewer.id,
+                    Booking.lawyer_id.in_(lawyer_ids),
+                    Booking.status == "confirmed",
+                )
+                .all()
+            )
+            confirmed_lawyer_ids = {b[0] for b in confirmed_bookings}
+
+        for l in lawyers:
+            can_view = False
+            if is_staff:
+                can_view = True
+            elif viewer and viewer.id == l.user_id:
+                can_view = True
+            elif l.id in confirmed_lawyer_ids:
+                can_view = True
+            phone_map[l.id] = l.phone if can_view else None
+
+    # Assemble responses
+    results = []
+    for lawyer in lawyers:
+        avatar_asset_id = avatar_map.get(lawyer.user_id)
+        next_available = next_available_map.get(lawyer.id)
+        presence_status = "in_consultation" if lawyer.id in busy_lawyer_ids else "available"
+        avg_rating, review_count = review_map.get(lawyer.user_id, (None, 0))
+        phone = phone_map.get(lawyer.id) if allow_phone else None
+
+        rate = getattr(lawyer, "hourly_rate", None)
+        if rate is None or rate == 0:
+            rate = 2500 if lawyer.verification_paid else 1500
+
+        exp = getattr(lawyer, "years_exp", None)
+        if exp is None or exp == 0:
+            exp = 8
+            if lawyer.bar_council_id:
+                m = re.search(r"\b(19\d\d|20\d\d)\b", lawyer.bar_council_id)
+                if m:
+                    exp = max(1, 2026 - int(m.group(1)))
+
+        langs = getattr(lawyer, "languages", None) or "Bangla, English"
+
+        results.append(
+            LawyerResponse(
+                id=str(lawyer.id),
+                name=lawyer.name,
+                district=lawyer.district,
+                specialization=lawyer.specialization,
+                phone=phone,
+                verification_status=lawyer.verification_status,
+                bar_council_id=lawyer.bar_council_id,
+                verification_paid=lawyer.verification_paid,
+                avatar_asset_id=avatar_asset_id,
+                next_available=next_available,
+                hourly_rate=rate,
+                years_exp=exp,
+                languages=langs,
+                presence_status=presence_status,
+                avg_rating=avg_rating,
+                review_count=review_count,
+                meeting_provider=getattr(lawyer, "meeting_provider", None),
+                meeting_link=getattr(lawyer, "meeting_link", None),
+                payment_methods=getattr(lawyer, "payment_methods", []) or [],
+                payment_instructions=getattr(lawyer, "payment_instructions", None),
+            )
+        )
+    return results
+
+
 def _enrich_lawyer(
     lawyer: LawyerProfile,
     db: Session,
     viewer: Optional[User] = None,
     allow_phone: bool = False,
 ) -> LawyerResponse:
-    """
-    Enriches a LawyerProfile with decision-making information:
-    - avatar_asset_id from ProfileAsset
-    - next_available slot from Schedule
-    - hourly_rate (fee), years_exp, and languages
-    - phone: only populated if allow_phone is True and viewer has permission
-    """
-    # 1. avatar_asset_id
-    avatar_asset = (
-        db.query(ProfileAsset)
-        .filter(
-            ProfileAsset.owner_user_id == lawyer.user_id,
-            ProfileAsset.kind == "avatar",
-        )
-        .order_by(ProfileAsset.created_at.desc())
-        .first()
-    )
-    avatar_asset_id = str(avatar_asset.id) if avatar_asset else None
-
-    # 2. next_available slot (is_booked == False and date >= today, earliest date & time)
-    today = datetime.now().date()
-    open_slots = (
-        db.query(Schedule)
-        .filter(
-            Schedule.lawyer_id == lawyer.id,
-            Schedule.is_booked == False,
-            Schedule.date >= today,
-        )
-        .order_by(Schedule.date.asc(), Schedule.start_time.asc())
-        .all()
-    )
-
-    next_available = None
-    if open_slots:
-        min_date = open_slots[0].date
-        same_date_slots = [s for s in open_slots if s.date == min_date]
-
-        def _parse_time(t_str: str):
-            try:
-                return datetime.strptime(t_str.strip(), "%I:%M %p").time()
-            except Exception:
-                try:
-                    return datetime.strptime(t_str.strip(), "%H:%M").time()
-                except Exception:
-                    return datetime.min.time()
-
-        best_slot = min(same_date_slots, key=lambda s: _parse_time(s.start_time))
-        date_str = best_slot.date.isoformat() if hasattr(best_slot.date, "isoformat") else str(best_slot.date)
-        next_available = {
-            "date": date_str,
-            "start_time": best_slot.start_time,
-        }
-
-    # 3. Decision metrics: fee/hourly_rate, years_exp, languages
-    rate = getattr(lawyer, "hourly_rate", None)
-    if rate is None or rate == 0:
-        rate = 2500 if lawyer.verification_paid else 1500
-
-    exp = getattr(lawyer, "years_exp", None)
-    if exp is None or exp == 0:
-        exp = 8
-        if lawyer.bar_council_id:
-            m = re.search(r"\b(19\d\d|20\d\d)\b", lawyer.bar_council_id)
-            if m:
-                exp = max(1, 2026 - int(m.group(1)))
-
-    langs = getattr(lawyer, "languages", None) or "Bangla, English"
-
-    # 4. Protected phone field
-    phone = lawyer.phone if (allow_phone and _can_view_phone(lawyer, viewer, db)) else None
-
-    return LawyerResponse(
-        id=str(lawyer.id),
-        name=lawyer.name,
-        district=lawyer.district,
-        specialization=lawyer.specialization,
-        phone=phone,
-        verification_status=lawyer.verification_status,
-        bar_council_id=lawyer.bar_council_id,
-        verification_paid=lawyer.verification_paid,
-        avatar_asset_id=avatar_asset_id,
-        next_available=next_available,
-        hourly_rate=rate,
-        years_exp=exp,
-        languages=langs,
-    )
+    """Helper for single lawyer profile enrichment."""
+    return _enrich_lawyers_bulk([lawyer], db, viewer=viewer, allow_phone=allow_phone)[0]
 
 
 @router.get("/lawyers", response_model=List[LawyerListResponse])
@@ -171,7 +272,7 @@ def get_lawyers(
         query = query.filter(LawyerProfile.specialization.ilike(f"%{specialization.strip()}%"))
 
     lawyers = query.order_by(LawyerProfile.name.asc()).all()
-    return [_enrich_lawyer(l, db, viewer=current_user, allow_phone=False) for l in lawyers]
+    return _enrich_lawyers_bulk(lawyers, db, viewer=current_user, allow_phone=False)
 
 
 @router.get("/admin/lawyers", response_model=List[LawyerResponse])
@@ -188,7 +289,7 @@ def get_admin_lawyers(
     if status_filter:
         query = query.filter(LawyerProfile.verification_status == status_filter.strip())
     lawyers = query.order_by(LawyerProfile.created_at.desc()).all()
-    return [_enrich_lawyer(l, db, viewer=current_user, allow_phone=True) for l in lawyers]
+    return _enrich_lawyers_bulk(lawyers, db, viewer=current_user, allow_phone=True)
 
 
 @router.get("/lawyers/{lawyer_id}", response_model=LawyerResponse)
@@ -339,4 +440,160 @@ def update_my_lawyer_profile(
     db.commit()
     db.refresh(profile)
     return _enrich_lawyer(profile, db, viewer=current_user, allow_phone=True)
+
+
+@router.put("/lawyer/me/payment-settings", response_model=LawyerPaymentInfoResponse)
+def update_my_payment_settings(
+    settings_in: LawyerPaymentSettingsUpdate,
+    current_user: User = Depends(require_role("lawyer")),
+    db: Session = Depends(get_db),
+):
+    """
+    Updates the authenticated lawyer's payment methods and instructions.
+    """
+    profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+    if not profile:
+        profile = LawyerProfile(
+            id=uuid.uuid4(),
+            user_id=current_user.id,
+            name=current_user.full_name or "Advocate",
+            verification_status="pending",
+            verification_paid=False,
+        )
+        db.add(profile)
+
+    profile.payment_methods = settings_in.payment_methods
+    profile.payment_instructions = settings_in.payment_instructions.strip() if settings_in.payment_instructions else None
+
+    db.commit()
+    db.refresh(profile)
+
+    return {
+        "payment_methods": profile.payment_methods or [],
+        "payment_instructions": profile.payment_instructions,
+    }
+
+
+@router.get("/lawyer/me/payment-settings", response_model=LawyerPaymentInfoResponse)
+def get_my_payment_settings(
+    current_user: User = Depends(require_role("lawyer")),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns current lawyer's payment methods and instructions.
+    """
+    profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+    if not profile:
+        return {"payment_methods": [], "payment_instructions": None}
+
+    return {
+        "payment_methods": profile.payment_methods or [],
+        "payment_instructions": profile.payment_instructions,
+    }
+
+
+@router.get("/lawyers/{lawyer_id}/payment-info", response_model=LawyerPaymentInfoResponse)
+def get_lawyer_payment_info(
+    lawyer_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Public endpoint: returns payment methods and instructions for a lawyer.
+    Supports either lawyer_profile.id or lawyer_profile.user_id.
+    """
+    target_uuid = _parse_uuid(lawyer_id)
+    profile = (
+        db.query(LawyerProfile)
+        .filter((LawyerProfile.id == target_uuid) | (LawyerProfile.user_id == target_uuid))
+        .first()
+    )
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Lawyer profile not found",
+        )
+
+    return {
+        "payment_methods": profile.payment_methods or [],
+        "payment_instructions": profile.payment_instructions,
+    }
+
+
+@router.put("/lawyer/me/meeting-settings", response_model=LawyerMeetingInfoResponse)
+def update_my_meeting_settings(
+    settings_in: LawyerMeetingSettingsUpdate,
+    current_user: User = Depends(require_role("lawyer")),
+    db: Session = Depends(get_db),
+):
+    """
+    Updates the authenticated lawyer's meeting provider and meeting link.
+    """
+    profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+    if not profile:
+        profile = LawyerProfile(
+            id=uuid.uuid4(),
+            user_id=current_user.id,
+            name=current_user.full_name or "Advocate",
+            verification_status="pending",
+            verification_paid=False,
+        )
+        db.add(profile)
+
+    profile.meeting_provider = settings_in.meeting_provider.strip() if settings_in.meeting_provider else None
+    profile.meeting_link = settings_in.meeting_link.strip() if settings_in.meeting_link else None
+
+    db.commit()
+    db.refresh(profile)
+
+    return {
+        "meeting_provider": profile.meeting_provider,
+        "meeting_link": profile.meeting_link,
+    }
+
+
+@router.get("/lawyer/me/meeting-settings", response_model=LawyerMeetingInfoResponse)
+def get_my_meeting_settings(
+    current_user: User = Depends(require_role("lawyer")),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns the authenticated lawyer's meeting provider and meeting link.
+    """
+    profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+    if not profile:
+        return {"meeting_provider": None, "meeting_link": None}
+
+    return {
+        "meeting_provider": profile.meeting_provider,
+        "meeting_link": profile.meeting_link,
+    }
+
+
+@router.get("/lawyers/{lawyer_id}/meeting-info", response_model=LawyerMeetingInfoResponse)
+def get_lawyer_meeting_info(
+    lawyer_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Returns a lawyer's meeting provider and meeting link.
+    Supports either lawyer_profile.id or lawyer_profile.user_id.
+    """
+    target_uuid = _parse_uuid(lawyer_id)
+    profile = (
+        db.query(LawyerProfile)
+        .filter((LawyerProfile.id == target_uuid) | (LawyerProfile.user_id == target_uuid))
+        .first()
+    )
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Lawyer profile not found",
+        )
+
+    return {
+        "meeting_provider": profile.meeting_provider,
+        "meeting_link": profile.meeting_link,
+    }
+
+
 

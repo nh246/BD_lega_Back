@@ -3,17 +3,20 @@ Bookings router: Client booking creation, client's bookings listing,
 and lawyer booking management (confirmation/cancellation).
 """
 
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
+import re
 from typing import List
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_role
-from app.models import Booking, LawyerProfile, Schedule, User, Subscription, Plan
-from app.schemas import BookingCreate, BookingResponse, BookingUpdate
+from app.models import Booking, LawyerProfile, Schedule, User, Subscription, Plan, AuditLog
+from app.schemas import BookingCreate, BookingPaymentSubmit, BookingResponse, BookingUpdate
 from app.audit import log_audit
+from app.services.notifications import trigger_notification
 
 router = APIRouter(prefix="/api", tags=["Bookings"])
 
@@ -31,6 +34,34 @@ def _parse_uuid(id_str: str, entity_name: str = "Booking") -> uuid.UUID:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"{entity_name} not found",
         )
+
+
+def _check_and_apply_lazy_autocomplete(booking: Booking, db: Session) -> bool:
+    """
+    Lazy Auto-Complete:
+    If status == 'completion_requested' and (now - completion_requested_at) > 48 hours,
+    update status to 'completed', completed_at = now, and commit.
+    """
+    if booking.status == "completion_requested" and booking.completion_requested_at:
+        now = datetime.now(timezone.utc)
+        req_at = booking.completion_requested_at
+        if req_at.tzinfo is None:
+            req_at = req_at.replace(tzinfo=timezone.utc)
+        if (now - req_at) > timedelta(hours=48):
+            booking.status = "completed"
+            booking.completed_at = now
+            log_audit(
+                db=db,
+                actor_id=booking.user_id,
+                action="booking_auto_completed",
+                target_type="booking",
+                target_id=str(booking.id),
+                details={"auto_completed_after_hours": 48},
+            )
+            db.commit()
+            db.refresh(booking)
+            return True
+    return False
 
 
 @router.post("/bookings", response_model=BookingResponse, status_code=status.HTTP_201_CREATED)
@@ -130,12 +161,22 @@ def create_booking(
     # Mark slot as booked
     schedule.is_booked = True
 
-    # Create pending booking
+    # Check lawyer hourly_rate: > 0 -> awaiting_payment, == 0 -> confirmed
+    lawyer_profile = schedule.lawyer
+    if not lawyer_profile:
+        lawyer_profile = db.query(LawyerProfile).filter(LawyerProfile.id == schedule.lawyer_id).first()
+
+    hourly_rate = lawyer_profile.hourly_rate if lawyer_profile and lawyer_profile.hourly_rate is not None else 0
+    initial_status = "awaiting_payment" if hourly_rate > 0 else "confirmed"
+
+    # Create booking
+    meeting_link_prefill = getattr(lawyer_profile, "meeting_link", None) if lawyer_profile else None
     new_booking = Booking(
         user_id=current_user.id,
         lawyer_id=schedule.lawyer_id,
         schedule_id=schedule.id,
-        status="pending",
+        status=initial_status,
+        meeting_link=meeting_link_prefill,
     )
     db.add(new_booking)
     db.commit()
@@ -192,6 +233,8 @@ def get_my_bookings(
         .order_by(Booking.created_at.desc())
         .all()
     )
+    for b in bookings:
+        _check_and_apply_lazy_autocomplete(b, db)
     return bookings
 
 
@@ -235,6 +278,7 @@ def get_lawyer_bookings(
 
     booking_dicts = []
     for booking in bookings:
+        _check_and_apply_lazy_autocomplete(booking, db)
         b_dict = BookingResponse.model_validate(booking).model_dump()
         b_dict["is_pro"] = (booking.user_id in pro_user_ids) or (str(booking.user_id) in {str(u) for u in pro_user_ids})
         booking_dicts.append(b_dict)
@@ -282,6 +326,8 @@ def get_lawyer_request_detail(
             detail="You do not have permission to view this booking",
         )
 
+    _check_and_apply_lazy_autocomplete(booking, db)
+
     return booking
 
 
@@ -324,6 +370,8 @@ def get_booking_detail(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied to this booking",
         )
+
+    _check_and_apply_lazy_autocomplete(booking, db)
 
     return booking
 
@@ -410,6 +458,20 @@ def update_lawyer_booking(
         },
     )
 
+    if target_status == "confirmed":
+        lawyer_name = booking.lawyer.name if booking.lawyer and booking.lawyer.name else "Advocate"
+        try:
+            trigger_notification(
+                db=db,
+                user_id=booking.user_id,
+                type="booking_confirmed",
+                title="Booking Confirmed",
+                message=f"Your booking with {lawyer_name} is confirmed.",
+                link="/client/bookings",
+            )
+        except Exception:
+            pass
+
     return booking
 
 
@@ -480,3 +542,625 @@ def client_cancel_booking(
     )
 
     return booking
+
+
+@router.post("/bookings/{booking_id}/submit-payment", response_model=BookingResponse)
+def submit_booking_payment(
+    booking_id: str,
+    payment_in: BookingPaymentSubmit,
+    current_user: User = Depends(require_role("user")),
+    db: Session = Depends(get_db),
+):
+    """
+    Client submits payment details (TrxID and optional screenshot asset ID).
+    Booking status must be 'awaiting_payment'.
+    Transitions status to 'payment_submitted'.
+    """
+    booking_uuid = _parse_uuid(booking_id, "Booking")
+    booking = (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.user),
+            joinedload(Booking.lawyer),
+            joinedload(Booking.schedule),
+        )
+        .filter(Booking.id == booking_uuid)
+        .first()
+    )
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+
+    if booking.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only submit payment for your own bookings",
+        )
+
+    if booking.status != "awaiting_payment":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot submit payment for booking with status '{booking.status}'. Must be 'awaiting_payment'.",
+        )
+
+    if not payment_in.trx_id or not payment_in.trx_id.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Transaction ID (trx_id) is required",
+        )
+
+    booking.trx_id = payment_in.trx_id.strip()
+
+    if payment_in.screenshot_asset_id:
+        try:
+            booking.screenshot_asset_id = uuid.UUID(str(payment_in.screenshot_asset_id))
+        except (ValueError, TypeError):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid screenshot_asset_id UUID format",
+            )
+    else:
+        booking.screenshot_asset_id = None
+
+    booking.status = "payment_submitted"
+
+    log_audit(
+        db=db,
+        actor_id=current_user.id,
+        action="booking_payment_submitted",
+        target_type="booking",
+        target_id=str(booking.id),
+        details={
+            "trx_id": booking.trx_id,
+            "screenshot_asset_id": str(booking.screenshot_asset_id) if booking.screenshot_asset_id else None,
+        },
+    )
+
+    db.commit()
+    db.refresh(booking)
+
+    if booking.lawyer and booking.lawyer.user_id:
+        try:
+            trigger_notification(
+                db=db,
+                user_id=booking.lawyer.user_id,
+                type="payment_submitted",
+                title="Payment Proof Submitted",
+                message="Client submitted payment proof. Please verify.",
+                link="/lawyer/dashboard",
+            )
+        except Exception:
+            pass
+
+    return booking
+
+
+@router.post("/bookings/{booking_id}/confirm-payment", response_model=BookingResponse)
+@router.post("/lawyer/bookings/{booking_id}/confirm-payment", response_model=BookingResponse)
+def confirm_booking_payment(
+    booking_id: str,
+    current_user: User = Depends(require_role("lawyer")),
+    db: Session = Depends(get_db),
+):
+    """
+    Lawyer confirms receipt of payment.
+    Booking status must be 'payment_submitted'.
+    Transitions status to 'confirmed'.
+    """
+    profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User does not have an associated lawyer profile",
+        )
+
+    booking_uuid = _parse_uuid(booking_id, "Booking")
+    booking = (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.user),
+            joinedload(Booking.lawyer),
+            joinedload(Booking.schedule),
+        )
+        .filter(Booking.id == booking_uuid)
+        .first()
+    )
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+
+    if booking.lawyer_id != profile.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to manage this booking",
+        )
+
+    if booking.status != "payment_submitted":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot confirm payment for booking with status '{booking.status}'. Must be 'payment_submitted'.",
+        )
+
+    booking.status = "confirmed"
+
+    log_audit(
+        db=db,
+        actor_id=current_user.id,
+        action="booking_payment_confirmed",
+        target_type="booking",
+        target_id=str(booking.id),
+        details={
+            "trx_id": booking.trx_id,
+            "new_status": "confirmed",
+        },
+    )
+
+    db.commit()
+    db.refresh(booking)
+
+    try:
+        trigger_notification(
+            db=db,
+            user_id=booking.user_id,
+            type="payment_confirmed",
+            title="Payment Confirmed",
+            message="Your payment was confirmed by the lawyer.",
+            link="/client/bookings",
+        )
+    except Exception:
+        pass
+
+    return booking
+
+
+@router.post("/bookings/{booking_id}/reject-payment", response_model=BookingResponse)
+@router.post("/lawyer/bookings/{booking_id}/reject-payment", response_model=BookingResponse)
+def reject_booking_payment(
+    booking_id: str,
+    current_user: User = Depends(require_role("lawyer")),
+    db: Session = Depends(get_db),
+):
+    """
+    Lawyer rejects payment submission (e.g. invalid TrxID).
+    Booking status must be 'payment_submitted'.
+    Transitions status back to 'awaiting_payment' so client can retry.
+    """
+    profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User does not have an associated lawyer profile",
+        )
+
+    booking_uuid = _parse_uuid(booking_id, "Booking")
+    booking = (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.user),
+            joinedload(Booking.lawyer),
+            joinedload(Booking.schedule),
+        )
+        .filter(Booking.id == booking_uuid)
+        .first()
+    )
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+
+    if booking.lawyer_id != profile.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to manage this booking",
+        )
+
+    if booking.status != "payment_submitted":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot reject payment for booking with status '{booking.status}'. Must be 'payment_submitted'.",
+        )
+
+    booking.status = "awaiting_payment"
+
+    log_audit(
+        db=db,
+        actor_id=current_user.id,
+        action="booking_payment_rejected",
+        target_type="booking",
+        target_id=str(booking.id),
+        details={
+            "trx_id": booking.trx_id,
+            "new_status": "awaiting_payment",
+        },
+    )
+
+    db.commit()
+    db.refresh(booking)
+    return booking
+
+
+def _parse_slot_time(t_str: str):
+    if not t_str:
+        return datetime.min.time()
+    clean = re.sub(r"\(.*?\)", "", t_str).strip()
+    for fmt in ("%I:%M %p", "%H:%M", "%I %p"):
+        try:
+            return datetime.strptime(clean, fmt).time()
+        except Exception:
+            pass
+    return datetime.min.time()
+
+
+@router.post("/bookings/{booking_id}/start-meeting", response_model=BookingResponse)
+def start_meeting(
+    booking_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Starts consultation meeting for a confirmed booking.
+    Can be called by either the client or the lawyer.
+    Sets meeting_started_at and clears meeting_ended_at.
+    """
+    booking_uuid = _parse_uuid(booking_id, "Booking")
+    booking = (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.user),
+            joinedload(Booking.lawyer),
+            joinedload(Booking.schedule),
+        )
+        .filter(Booking.id == booking_uuid)
+        .first()
+    )
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+
+    # Permission check: client or lawyer or admin/moderator
+    is_client = booking.user_id == current_user.id
+    is_lawyer = bool(booking.lawyer and booking.lawyer.user_id == current_user.id)
+    is_staff = current_user.role in ["admin", "moderator"]
+    if not (is_client or is_lawyer or is_staff):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to start this meeting",
+        )
+
+    if booking.status != "confirmed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only confirmed bookings can start a meeting",
+        )
+
+    booking.meeting_started_at = datetime.now(timezone.utc)
+    booking.meeting_ended_at = None
+
+    if not booking.meeting_link and booking.lawyer and booking.lawyer.meeting_link:
+        booking.meeting_link = booking.lawyer.meeting_link
+
+    log_audit(
+        db=db,
+        actor_id=current_user.id,
+        action="meeting_started",
+        target_type="booking",
+        target_id=str(booking.id),
+        details={"started_at": booking.meeting_started_at.isoformat()},
+    )
+
+    db.commit()
+    db.refresh(booking)
+    return booking
+
+
+@router.post("/bookings/{booking_id}/extend-meeting")
+def extend_meeting(
+    booking_id: str,
+    current_user: User = Depends(require_role("lawyer")),
+    db: Session = Depends(get_db),
+):
+    """
+    Lawyer extends the consultation meeting by 30 minutes if their next schedule slot is free.
+    If next slot is booked: returns 400 {"error":"next_slot_booked","message":"Cannot extend. Your next client starts at [time]."}
+    """
+    profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User does not have an associated lawyer profile",
+        )
+
+    booking_uuid = _parse_uuid(booking_id, "Booking")
+    booking = (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.user),
+            joinedload(Booking.lawyer),
+            joinedload(Booking.schedule),
+        )
+        .filter(Booking.id == booking_uuid)
+        .first()
+    )
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+
+    if booking.lawyer_id != profile.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to manage this booking",
+        )
+
+    if booking.status != "confirmed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only confirmed bookings can be extended",
+        )
+
+    current_sched = booking.schedule
+    curr_date = current_sched.date if current_sched else datetime.now(timezone.utc).date()
+    curr_start_t = _parse_slot_time(current_sched.start_time) if current_sched else datetime.min.time()
+    curr_end_t = _parse_slot_time(current_sched.end_time) if current_sched else datetime.min.time()
+
+    curr_start_dt = datetime.combine(curr_date, curr_start_t)
+    curr_end_dt = datetime.combine(curr_date, curr_end_t)
+    if curr_end_dt <= curr_start_dt:
+        curr_end_dt = curr_start_dt + timedelta(minutes=30)
+
+    effective_end_dt = curr_end_dt + timedelta(minutes=booking.extended_minutes or 0)
+
+    # Fetch lawyer's subsequent schedule slots on or after this date
+    subsequent_slots = (
+        db.query(Schedule)
+        .filter(
+            Schedule.lawyer_id == profile.id,
+            Schedule.id != (current_sched.id if current_sched else None),
+            Schedule.date >= curr_date,
+        )
+        .all()
+    )
+
+    candidates = []
+    for s in subsequent_slots:
+        s_start_dt = datetime.combine(s.date, _parse_slot_time(s.start_time))
+        if s_start_dt >= effective_end_dt:
+            candidates.append((s_start_dt, s))
+
+    candidates.sort(key=lambda x: x[0])
+
+    if candidates:
+        next_dt, next_slot = candidates[0]
+        if next_slot.is_booked:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "error": "next_slot_booked",
+                    "message": f"Cannot extend. Your next client starts at {next_slot.start_time}.",
+                },
+            )
+
+    booking.extended_minutes = (booking.extended_minutes or 0) + 30
+
+    log_audit(
+        db=db,
+        actor_id=current_user.id,
+        action="meeting_extended",
+        target_type="booking",
+        target_id=str(booking.id),
+        details={"extended_minutes": booking.extended_minutes},
+    )
+
+    db.commit()
+    db.refresh(booking)
+
+    return BookingResponse.model_validate(booking)
+
+
+@router.post("/bookings/{booking_id}/end-meeting", response_model=BookingResponse)
+def end_meeting(
+    booking_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Ends consultation meeting for a booking.
+    Can be called by either the client or the lawyer.
+    Sets meeting_ended_at.
+    """
+    booking_uuid = _parse_uuid(booking_id, "Booking")
+    booking = (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.user),
+            joinedload(Booking.lawyer),
+            joinedload(Booking.schedule),
+        )
+        .filter(Booking.id == booking_uuid)
+        .first()
+    )
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+
+    # Permission check: client or lawyer or admin/moderator
+    is_client = booking.user_id == current_user.id
+    is_lawyer = bool(booking.lawyer and booking.lawyer.user_id == current_user.id)
+    is_staff = current_user.role in ["admin", "moderator"]
+    if not (is_client or is_lawyer or is_staff):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to end this meeting",
+        )
+
+    booking.meeting_ended_at = datetime.now(timezone.utc)
+
+    log_audit(
+        db=db,
+        actor_id=current_user.id,
+        action="meeting_ended",
+        target_type="booking",
+        target_id=str(booking.id),
+        details={"ended_at": booking.meeting_ended_at.isoformat()},
+    )
+
+    db.commit()
+    db.refresh(booking)
+    return booking
+
+
+@router.post("/bookings/{booking_id}/request-completion", response_model=BookingResponse)
+def request_booking_completion(
+    booking_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Either party (client or lawyer) requests completion of the consultation.
+    Requires booking status to be 'confirmed'.
+    Sets status = 'completion_requested', completion_requested_at = now.
+    """
+    booking_uuid = _parse_uuid(booking_id, "Booking")
+    booking = (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.user),
+            joinedload(Booking.lawyer),
+            joinedload(Booking.schedule),
+        )
+        .filter(Booking.id == booking_uuid)
+        .first()
+    )
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+
+    is_client = booking.user_id == current_user.id
+    is_lawyer = bool(booking.lawyer and booking.lawyer.user_id == current_user.id)
+    if not (is_client or is_lawyer):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to request completion for this booking",
+        )
+
+    if booking.status != "confirmed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot request completion for booking with status '{booking.status}'. Status must be 'confirmed'.",
+        )
+
+    now = datetime.now(timezone.utc)
+    booking.status = "completion_requested"
+    booking.completion_requested_at = now
+    booking.completion_requested_by = "client" if is_client else "lawyer"
+
+    log_audit(
+        db=db,
+        actor_id=current_user.id,
+        action="booking_completion_requested",
+        target_type="booking",
+        target_id=str(booking.id),
+        details={
+            "requested_by": "client" if is_client else "lawyer",
+            "requested_at": now.isoformat(),
+        },
+    )
+
+    db.commit()
+    db.refresh(booking)
+    return booking
+
+
+@router.post("/bookings/{booking_id}/confirm-completion", response_model=BookingResponse)
+def confirm_booking_completion(
+    booking_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    The other party confirms completion of the consultation.
+    Requires booking status to be 'completion_requested'.
+    Sets status = 'completed', completed_at = now.
+    """
+    booking_uuid = _parse_uuid(booking_id, "Booking")
+    booking = (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.user),
+            joinedload(Booking.lawyer),
+            joinedload(Booking.schedule),
+        )
+        .filter(Booking.id == booking_uuid)
+        .first()
+    )
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+
+    is_client = booking.user_id == current_user.id
+    is_lawyer = bool(booking.lawyer and booking.lawyer.user_id == current_user.id)
+    if not (is_client or is_lawyer):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to confirm this booking",
+        )
+
+    if booking.status != "completion_requested":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Booking is not awaiting completion confirmation. Current status: '{booking.status}'.",
+        )
+
+    # Validate that current user is the OTHER party (not the one who requested completion)
+    last_req = (
+        db.query(AuditLog)
+        .filter(
+            AuditLog.target_type == "booking",
+            AuditLog.target_id == str(booking.id),
+            AuditLog.action == "booking_completion_requested",
+        )
+        .order_by(AuditLog.created_at.desc())
+        .first()
+    )
+    if last_req and last_req.actor_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot confirm completion requested by yourself. The other party must confirm.",
+        )
+
+    now = datetime.now(timezone.utc)
+    booking.status = "completed"
+    booking.completed_at = now
+
+    log_audit(
+        db=db,
+        actor_id=current_user.id,
+        action="booking_completed",
+        target_type="booking",
+        target_id=str(booking.id),
+        details={
+            "confirmed_by": "lawyer" if is_lawyer else "client",
+            "completed_at": now.isoformat(),
+        },
+    )
+
+    db.commit()
+    db.refresh(booking)
+    return booking
+
+
+
