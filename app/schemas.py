@@ -253,9 +253,13 @@ class BookingResponse(BaseModel):
     completion_requested_by: Optional[str] = None
     completed_at: Optional[str] = None
     case_brief: Optional[str] = None
+    fee: Optional[int] = None
     has_reviewed: Optional[bool] = False
+    case_id: Optional[str] = None
+    bid_id: Optional[str] = None
+    case_title: Optional[str] = None
 
-    @field_validator("id", "user_id", "lawyer_id", "schedule_id", mode="before")
+    @field_validator("id", "user_id", "lawyer_id", "schedule_id", "case_id", "bid_id", mode="before")
     @classmethod
     def serialize_uuid(cls, v):
         if v is None:
@@ -326,6 +330,23 @@ class BookingResponse(BaseModel):
             else None
         )
 
+        cb = data.get("case_brief") if isinstance(data, dict) else getattr(data, "case_brief", None)
+        extracted_case_id = data.get("case_id") if isinstance(data, dict) else getattr(data, "case_id", None)
+        extracted_bid_id = data.get("bid_id") if isinstance(data, dict) else getattr(data, "bid_id", None)
+        extracted_case_title = data.get("case_title") if isinstance(data, dict) else getattr(data, "case_title", None)
+
+        if cb and not extracted_case_id:
+            import re
+            m_c = re.search(r"\[CaseID:\s*([a-f0-9\-]+)\]", str(cb))
+            if m_c:
+                extracted_case_id = m_c.group(1)
+            m_b = re.search(r"\[BidID:\s*([a-f0-9\-]+)\]", str(cb))
+            if m_b:
+                extracted_bid_id = m_b.group(1)
+            m_title = re.search(r"Case Acceptance:\s*(?:\[.*?\]\s*)*([^.]+?)(?:\.\s*Lawyer Pitch:|$)", str(cb))
+            if m_title:
+                extracted_case_title = m_title.group(1).strip()
+
         return {
             "id": str(getattr(data, "id", "")),
             "user_id": str(getattr(data, "user_id", "")),
@@ -382,6 +403,18 @@ class BookingResponse(BaseModel):
                 if isinstance(data, dict)
                 else getattr(data, "case_brief", None)
             ),
+            "fee": (
+                data.get("fee")
+                if isinstance(data, dict)
+                else (
+                    getattr(data, "fee", None)
+                    if getattr(data, "fee", None) is not None
+                    else (getattr(data.lawyer, "hourly_rate", None) if hasattr(data, "lawyer") and data.lawyer else None)
+                )
+            ),
+            "case_id": extracted_case_id,
+            "bid_id": extracted_bid_id,
+            "case_title": extracted_case_title,
         }
 
 
@@ -719,11 +752,13 @@ class DirectMessageResponse(BaseModel):
     content: str
     attachments: Optional[List[str]] = []
     is_read: bool = False
+    case_id: Optional[str] = None
+    bid_id: Optional[str] = None
     created_at: str
     sender_name: Optional[str] = None
     sender_role: Optional[str] = None
 
-    @field_validator("id", "sender_user_id", "lawyer_profile_id", "recipient_user_id", mode="before")
+    @field_validator("id", "sender_user_id", "lawyer_profile_id", "recipient_user_id", "case_id", "bid_id", mode="before")
     @classmethod
     def serialize_uuid(cls, v):
         if isinstance(v, uuid.UUID):
@@ -833,8 +868,15 @@ class NotificationListResponse(BaseModel):
 # --- Module 12: Case Board Schemas ---
 
 class CaseBidCreate(BaseModel):
-    proposed_fee: int = Field(..., ge=0, description="Proposed fee in BDT")
+    proposed_fee: Optional[int] = None
     pitch_message: str = Field(..., min_length=1, description="Pitch to the client")
+
+    @field_validator("proposed_fee")
+    @classmethod
+    def validate_proposed_fee(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError("Proposed fee must be greater than 0 if provided.")
+        return v
 
 
 class CaseBidResponse(BaseModel):
@@ -843,7 +885,7 @@ class CaseBidResponse(BaseModel):
     id: str
     case_id: str
     lawyer_profile_id: str
-    proposed_fee: int
+    proposed_fee: Optional[int] = None
     pitch_message: str
     status: str = "pending"
     created_at: str
@@ -902,8 +944,15 @@ class CasePostResponse(BaseModel):
     user_avatar_asset_id: Optional[str] = None
     bids: Optional[List[CaseBidResponse]] = None
     bid_count: Optional[int] = 0
+    my_bid: Optional[CaseBidResponse] = None
+    booking_id: Optional[str] = None
+    booking_status: Optional[str] = None
+    booking_fee: Optional[int] = None
+    booking_lawyer_id: Optional[str] = None
+    booking_lawyer_name: Optional[str] = None
+    booking_meeting_link: Optional[str] = None
 
-    @field_validator("id", "user_id", mode="before")
+    @field_validator("id", "user_id", "booking_id", "booking_lawyer_id", mode="before")
     @classmethod
     def serialize_uuid(cls, v):
         if v is None:
@@ -938,6 +987,7 @@ class CaseBidAcceptResponse(BaseModel):
     case_id: str
     bid_id: str
     status: str
+    fee: Optional[int] = None
 
 
 class CaseBidRejectResponse(BaseModel):
@@ -945,5 +995,36 @@ class CaseBidRejectResponse(BaseModel):
     case_id: str
     bid_id: str
     status: str
+
+
+class LawyerBidSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    case_id: str
+    case_title: str
+    case_status: str
+    category: Optional[str] = "General"
+    client_name: str
+    bid_id: str
+    proposed_fee: Optional[int] = None
+    pitch: str
+    bid_status: str
+    created_at: str
+    booking_id: Optional[str] = None
+
+    @field_validator("case_id", "bid_id", mode="before")
+    @classmethod
+    def serialize_uuid(cls, v):
+        if v is None:
+            return ""
+        return str(v)
+
+    @field_validator("booking_id", mode="before")
+    @classmethod
+    def serialize_booking_id(cls, v):
+        if v is None:
+            return None
+        return str(v)
+
 
 

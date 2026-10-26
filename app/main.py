@@ -153,6 +153,36 @@ def on_startup():
     except Exception:
         pass
 
+    # 5. One-time schedule slot data fix (ensure end_time != start_time)
+    try:
+        from app.core.database import SessionLocal
+        from app.models import Schedule
+        from datetime import datetime, timedelta
+        db = SessionLocal()
+        try:
+            schedules = db.query(Schedule).all()
+            changed = False
+            for s in schedules:
+                st = (s.start_time or "").strip()
+                et = (s.end_time or "").strip()
+                if st and (not et or et == st or "(30m)" in et or (et.startswith(st) and len(et) > len(st))):
+                    clean_st = st.replace(".", "").strip()
+                    for fmt in ["%I:%M %p", "%I:%M%p", "%H:%M"]:
+                        try:
+                            parsed_dt = datetime.strptime(clean_st, fmt)
+                            s.start_time = parsed_dt.strftime("%I:%M %p")
+                            s.end_time = (parsed_dt + timedelta(minutes=30)).strftime("%I:%M %p")
+                            changed = True
+                            break
+                        except ValueError:
+                            continue
+            if changed:
+                db.commit()
+        finally:
+            db.close()
+    except Exception:
+        pass
+
 
 @app.get("/health")
 def health_check(db: Session = Depends(get_db)):

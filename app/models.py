@@ -105,6 +105,18 @@ class Schedule(Base):
     booking = relationship("Booking", back_populates="schedule", uselist=False)
 
 
+class LawyerWeeklyAvailability(Base):
+    __tablename__ = "lawyer_weekly_availabilities"
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    lawyer_id = Column(Uuid, ForeignKey("lawyer_profiles.id"), unique=True, nullable=False)
+    schedule = Column(JSON, nullable=False, default=dict)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Relationships
+    lawyer = relationship("LawyerProfile", foreign_keys=[lawyer_id])
+
+
 class Booking(Base):
     __tablename__ = "bookings"
 
@@ -124,6 +136,7 @@ class Booking(Base):
     completion_requested_by = Column(String(50), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
     case_brief = Column(Text, nullable=True)
+    fee = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Relationships
@@ -261,6 +274,7 @@ class DirectMessage(Base):
     __table_args__ = (
         Index("ix_direct_messages_lawyer_created", "lawyer_profile_id", "created_at"),
         Index("ix_direct_messages_sender_created", "sender_user_id", "created_at"),
+        Index("ix_direct_messages_case_bid", "case_id", "bid_id", "created_at"),
     )
 
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -270,12 +284,16 @@ class DirectMessage(Base):
     content = Column(Text, nullable=False)
     attachments = Column(JSON, nullable=True, default=[])
     is_read = Column(Boolean, default=False, nullable=False)
+    case_id = Column(Uuid, ForeignKey("case_posts.id", ondelete="CASCADE"), nullable=True)
+    bid_id = Column(Uuid, ForeignKey("case_bids.id", ondelete="CASCADE"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Relationships
     sender = relationship("User", foreign_keys=[sender_user_id])
     recipient = relationship("User", foreign_keys=[recipient_user_id])
     lawyer_profile = relationship("LawyerProfile", foreign_keys=[lawyer_profile_id])
+    case = relationship("CasePost", foreign_keys=[case_id])
+    bid = relationship("CaseBid", foreign_keys=[bid_id])
 
 
 class Document(Base):
@@ -393,7 +411,7 @@ class CaseBid(Base):
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     case_id = Column(Uuid, ForeignKey("case_posts.id"), nullable=False)
     lawyer_profile_id = Column(Uuid, ForeignKey("lawyer_profiles.id"), nullable=False)
-    proposed_fee = Column(Integer, nullable=False)
+    proposed_fee = Column(Integer, nullable=True)
     pitch_message = Column(Text, nullable=False)
     status = Column(String(50), default="pending", nullable=False)  # "pending", "accepted", "rejected"
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)

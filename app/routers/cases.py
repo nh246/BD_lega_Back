@@ -10,15 +10,16 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from app.core.database import get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, require_role
 from app.core.plans import get_user_plan, is_pro_plan
 from app.models import (
     Booking,
     CasePost,
     CaseBid,
+    DirectMessage,
     LawyerProfile,
     ProfileAsset,
     Review,
@@ -32,6 +33,9 @@ from app.schemas import (
     CaseBidRejectResponse,
     CasePostCreate,
     CasePostResponse,
+    DirectMessageCreate,
+    DirectMessageResponse,
+    LawyerBidSummaryResponse,
 )
 from app.services.notifications import trigger_notification
 
@@ -78,35 +82,91 @@ def _is_gold_verified_lawyer(user: User, db: Session) -> tuple[bool, Optional[La
     return is_gold, profile
 
 
-def _enrich_case_post(case: CasePost, db: Session, include_bids: bool = False) -> CasePostResponse:
+def _serialize_bid(b: CaseBid, db: Session) -> CaseBidResponse:
+    lawyer = b.lawyer_profile
+    l_name = lawyer.name if lawyer else None
+    l_avatar = _get_user_avatar_id(db, lawyer.user_id) if lawyer else None
+    l_rating = _get_lawyer_rating(db, lawyer.user_id) if lawyer else None
+    return CaseBidResponse(
+        id=str(b.id),
+        case_id=str(b.case_id),
+        lawyer_profile_id=str(b.lawyer_profile_id),
+        proposed_fee=b.proposed_fee,
+        pitch_message=b.pitch_message,
+        status=b.status,
+        created_at=b.created_at.isoformat() if hasattr(b.created_at, "isoformat") else str(b.created_at),
+        lawyer_name=l_name,
+        lawyer_avatar_asset_id=l_avatar,
+        lawyer_avg_rating=l_rating,
+    )
+
+
+def _enrich_case_post(
+    case: CasePost,
+    db: Session,
+    current_user: Optional[User] = None,
+    include_bids: bool = False,
+) -> CasePostResponse:
     user = db.query(User).filter(User.id == case.user_id).first()
     user_name = user.full_name if user else None
     user_avatar = _get_user_avatar_id(db, case.user_id)
 
-    bids_list = None
     bid_count = len(case.bids) if case.bids else 0
+    bids_list: Optional[List[CaseBidResponse]] = None
+    my_bid_resp: Optional[CaseBidResponse] = None
 
-    if include_bids:
-        bids_list = []
-        for b in (case.bids or []):
-            lawyer = b.lawyer_profile
-            l_name = lawyer.name if lawyer else None
-            l_avatar = _get_user_avatar_id(db, lawyer.user_id) if lawyer else None
-            l_rating = _get_lawyer_rating(db, lawyer.user_id) if lawyer else None
-            bids_list.append(
-                CaseBidResponse(
-                    id=str(b.id),
-                    case_id=str(b.case_id),
-                    lawyer_profile_id=str(b.lawyer_profile_id),
-                    proposed_fee=b.proposed_fee,
-                    pitch_message=b.pitch_message,
-                    status=b.status,
-                    created_at=b.created_at.isoformat() if hasattr(b.created_at, "isoformat") else str(b.created_at),
-                    lawyer_name=l_name,
-                    lawyer_avatar_asset_id=l_avatar,
-                    lawyer_avg_rating=l_rating,
-                )
-            )
+    is_owner = bool(current_user and case.user_id == current_user.id)
+    is_staff = bool(current_user and current_user.role in ["admin", "moderator"])
+    is_lawyer = bool(current_user and current_user.role == "lawyer")
+
+    if is_owner or is_staff:
+        if include_bids and case.bids:
+            bids_list = [_serialize_bid(b, db) for b in case.bids]
+        elif include_bids:
+            bids_list = []
+        my_bid_resp = None
+    elif is_lawyer:
+        # Security: NEVER include competing lawyers' bids in bids array
+        bids_list = None
+        # Provide only their own bid object if they have bid on this case
+        lawyer_profile = (
+            db.query(LawyerProfile)
+            .filter(LawyerProfile.user_id == current_user.id)
+            .first()
+        )
+        if lawyer_profile and case.bids:
+            for b in case.bids:
+                if b.lawyer_profile_id == lawyer_profile.id:
+                    my_bid_resp = _serialize_bid(b, db)
+                    break
+    else:
+        # Default / other roles
+        bids_list = None
+        my_bid_resp = None
+
+    booking_id = None
+    booking_status = None
+    booking_fee = None
+    booking_lawyer_id = None
+    booking_lawyer_name = None
+    booking_meeting_link = None
+
+    if case.status == "assigned":
+        accepted_b = next((b for b in (case.bids or []) if b.status == "accepted"), None)
+        b_query = db.query(Booking).filter(Booking.user_id == case.user_id)
+        if accepted_b:
+            b_match = b_query.filter(Booking.lawyer_id == accepted_b.lawyer_profile_id).order_by(Booking.created_at.desc()).first()
+        else:
+            b_match = b_query.filter(Booking.case_brief.ilike(f"%{case.title}%")).order_by(Booking.created_at.desc()).first()
+        if not b_match:
+            b_match = b_query.filter(Booking.case_brief.ilike(f"%{case.title}%")).order_by(Booking.created_at.desc()).first()
+        if b_match:
+            booking_id = str(b_match.id)
+            booking_status = b_match.status
+            booking_fee = b_match.fee
+            booking_lawyer_id = str(b_match.lawyer_id)
+            booking_lawyer_name = b_match.lawyer.name if b_match.lawyer else None
+            booking_meeting_link = b_match.meeting_link
 
     return CasePostResponse(
         id=str(case.id),
@@ -121,6 +181,13 @@ def _enrich_case_post(case: CasePost, db: Session, include_bids: bool = False) -
         user_avatar_asset_id=user_avatar,
         bids=bids_list,
         bid_count=bid_count,
+        my_bid=my_bid_resp,
+        booking_id=booking_id,
+        booking_status=booking_status,
+        booking_fee=booking_fee,
+        booking_lawyer_id=booking_lawyer_id,
+        booking_lawyer_name=booking_lawyer_name,
+        booking_meeting_link=booking_meeting_link,
     )
 
 
@@ -171,7 +238,7 @@ def create_case_post(
     db.commit()
     db.refresh(case)
 
-    return _enrich_case_post(case, db, include_bids=False)
+    return _enrich_case_post(case, db, current_user=current_user, include_bids=False)
 
 
 # 2) GET /api/cases (Lawyers view the board)
@@ -212,7 +279,7 @@ def list_open_cases(
         query = query.filter(CasePost.category.ilike(f"%{category.strip()}%"))
 
     cases = query.order_by(CasePost.created_at.desc()).all()
-    return [_enrich_case_post(c, db, include_bids=False) for c in cases]
+    return [_enrich_case_post(c, db, current_user=current_user, include_bids=True) for c in cases]
 
 
 # 2.5) GET /api/cases/mine (Client views their posted cases)
@@ -231,7 +298,7 @@ def list_my_cases(
         .order_by(CasePost.created_at.desc())
         .all()
     )
-    return [_enrich_case_post(c, db, include_bids=True) for c in cases]
+    return [_enrich_case_post(c, db, current_user=current_user, include_bids=True) for c in cases]
 
 
 # 3) GET /api/cases/{case_id} (View details & bids)
@@ -245,7 +312,7 @@ def get_case_details(
     View details and bids for a specific case:
     - Client can view if they own it.
     - Lawyer can view if they are Verified/Paid.
-    - Include the list of CaseBids for this case.
+    - Include the list of CaseBids for this case if owner/staff; only my_bid for lawyers.
     """
     target_uuid = _parse_uuid(case_id, label="Case")
     case = db.query(CasePost).filter(CasePost.id == target_uuid).first()
@@ -273,7 +340,7 @@ def get_case_details(
             detail="You are not authorized to view this case.",
         )
 
-    return _enrich_case_post(case, db, include_bids=True)
+    return _enrich_case_post(case, db, current_user=current_user, include_bids=True)
 
 
 # 4) POST /api/cases/{case_id}/bid (Lawyer submits a bid)
@@ -485,22 +552,32 @@ def accept_case_bid(
         .first()
     )
     meeting_link_prefill = getattr(lawyer_profile, "meeting_link", None) if lawyer_profile else None
+    lawyer_rate = getattr(lawyer_profile, "hourly_rate", None)
+    if lawyer_rate is None:
+        lawyer_rate = 0
 
-    # 4. Create new Booking record
+    # 4. Accept-bid booking fee rule:
+    # fee = bid.proposed_fee if not None else lawyer.hourly_rate;
+    # if fee == 0 -> booking status "confirmed" (free consultation), else "awaiting_payment" (existing P2P flow)
+    fee = bid.proposed_fee if bid.proposed_fee is not None else lawyer_rate
+    booking_status = "confirmed" if fee == 0 else "awaiting_payment"
+
+    # 5. Create new Booking record
     booking = Booking(
         id=uuid.uuid4(),
         user_id=case.user_id,
         lawyer_id=bid.lawyer_profile_id,
         schedule_id=assigned_schedule.id,
-        status="awaiting_payment",
-        case_brief=f"Case Acceptance: {case.title}. Lawyer Pitch: {bid.pitch_message}",
+        status=booking_status,
+        fee=fee,
+        case_brief=f"Case Acceptance: [CaseID: {case.id}] [BidID: {bid.id}] {case.title}. Lawyer Pitch: {bid.pitch_message}",
         meeting_link=meeting_link_prefill,
         created_at=datetime.utcnow(),
     )
     db.add(booking)
     db.flush()
 
-    # 5. Trigger notification to the lawyer
+    # 6. Trigger notification to the lawyer
     lawyer_user_id = lawyer_profile.user_id if lawyer_profile else None
     if lawyer_user_id:
         try:
@@ -515,7 +592,7 @@ def accept_case_bid(
         except Exception:
             pass
 
-    # 6. Commit transaction
+    # 7. Commit transaction
     db.commit()
     db.refresh(booking)
 
@@ -525,6 +602,7 @@ def accept_case_bid(
         case_id=str(case.id),
         bid_id=str(bid.id),
         status=booking.status,
+        fee=booking.fee,
     )
 
 
@@ -609,3 +687,324 @@ def reject_case_bid(
         bid_id=str(bid.id),
         status="rejected",
     )
+
+
+def _serialize_direct_message(m: DirectMessage, db: Session) -> DirectMessageResponse:
+    sender_name = m.sender.full_name if m.sender else None
+    sender_role = m.sender.role if m.sender else None
+    return DirectMessageResponse(
+        id=str(m.id),
+        sender_user_id=str(m.sender_user_id),
+        lawyer_profile_id=str(m.lawyer_profile_id),
+        recipient_user_id=str(m.recipient_user_id) if m.recipient_user_id else None,
+        content=m.content,
+        attachments=[str(a) for a in (m.attachments or [])],
+        is_read=bool(m.is_read),
+        case_id=str(m.case_id) if m.case_id else None,
+        bid_id=str(m.bid_id) if m.bid_id else None,
+        created_at=m.created_at.isoformat() if hasattr(m.created_at, "isoformat") else str(m.created_at),
+        sender_name=sender_name,
+        sender_role=sender_role,
+    )
+
+
+# 7) POST /api/cases/{case_id}/bids/{bid_id}/messages (Send discussion message)
+@router.post(
+    "/cases/{case_id}/bids/{bid_id}/messages",
+    status_code=status.HTTP_201_CREATED,
+    response_model=DirectMessageResponse,
+)
+def send_case_bid_message(
+    case_id: str,
+    bid_id: str,
+    payload: DirectMessageCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Send a message within a case bid discussion thread.
+    Permissions:
+    - Requester must be case owner OR the lawyer who owns this bid (or admin/moderator).
+    - Thread is OPEN only while case status == 'open', OR
+      (case status == 'assigned' AND case's accepted bid == this bid).
+    - Otherwise return 403 {"error":"thread_closed", "message":"This case discussion is closed."}.
+    - Anyone else (including other bidding lawyers): 403.
+    """
+    case_uuid = _parse_uuid(case_id, label="Case")
+    bid_uuid = _parse_uuid(bid_id, label="Bid")
+
+    case = db.query(CasePost).filter(CasePost.id == case_uuid).first()
+    if not case:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Case not found",
+        )
+
+    bid = (
+        db.query(CaseBid)
+        .filter(CaseBid.id == bid_uuid, CaseBid.case_id == case.id)
+        .first()
+    )
+    if not bid:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Bid not found for this case",
+        )
+
+    is_owner = (case.user_id == current_user.id)
+    is_bid_lawyer = (
+        bid.lawyer_profile is not None
+        and bid.lawyer_profile.user_id == current_user.id
+    )
+    is_staff = current_user.role in ["admin", "moderator"]
+
+    if not (is_owner or is_bid_lawyer or is_staff):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to participate in this discussion thread.",
+        )
+
+    # Check thread open status:
+    # Open while case.status == "open", OR (case.status == "assigned" AND bid.status == "accepted")
+    is_open = (case.status == "open") or (case.status == "assigned" and bid.status == "accepted")
+    if not is_open:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={
+                "error": "thread_closed",
+                "message": "This case discussion is closed.",
+            },
+        )
+
+    cleaned_attachments = [str(a) for a in (payload.attachment_asset_ids or []) if a]
+    content_text = (payload.content or "").strip()
+    if not content_text and not cleaned_attachments:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Message cannot be empty",
+        )
+
+    # Determine recipient
+    if is_owner:
+        recipient_user_id = bid.lawyer_profile.user_id if bid.lawyer_profile else None
+    elif is_bid_lawyer:
+        recipient_user_id = case.user_id
+    else:
+        recipient_user_id = case.user_id if current_user.id != case.user_id else (bid.lawyer_profile.user_id if bid.lawyer_profile else None)
+
+    new_msg = DirectMessage(
+        id=uuid.uuid4(),
+        sender_user_id=current_user.id,
+        lawyer_profile_id=bid.lawyer_profile_id,
+        recipient_user_id=recipient_user_id,
+        case_id=case.id,
+        bid_id=bid.id,
+        content=content_text,
+        attachments=cleaned_attachments,
+        is_read=False,
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(new_msg)
+    db.commit()
+    db.refresh(new_msg)
+
+    # Trigger notification to the other party
+    if recipient_user_id:
+        try:
+            notif_link = "/client/cases" if is_bid_lawyer else "/lawyer?tab=case-board"
+            trigger_notification(
+                db=db,
+                user_id=recipient_user_id,
+                type="case_message",
+                title="New case message",
+                message=f"New message on case '{case.title}': {content_text[:60] if content_text else 'Attachment'}",
+                link=notif_link,
+            )
+        except Exception:
+            pass
+
+    return _serialize_direct_message(new_msg, db)
+
+
+# 8) GET /api/cases/{case_id}/bids/{bid_id}/messages (View discussion messages)
+@router.get(
+    "/cases/{case_id}/bids/{bid_id}/messages",
+    response_model=List[DirectMessageResponse],
+)
+def get_case_bid_messages(
+    case_id: str,
+    bid_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Get messages for a specific case bid discussion thread.
+    Permissions:
+    - Requester must be case owner OR the lawyer who owns this bid (or admin/moderator).
+    - Thread is OPEN only while case status == 'open', OR
+      (case status == 'assigned' AND case's accepted bid == this bid).
+    - Otherwise return 403 {"error":"thread_closed", "message":"This case discussion is closed."}.
+    - Anyone else (including other bidding lawyers): 403.
+    """
+    case_uuid = _parse_uuid(case_id, label="Case")
+    bid_uuid = _parse_uuid(bid_id, label="Bid")
+
+    case = db.query(CasePost).filter(CasePost.id == case_uuid).first()
+    if not case:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Case not found",
+        )
+
+    bid = (
+        db.query(CaseBid)
+        .filter(CaseBid.id == bid_uuid, CaseBid.case_id == case.id)
+        .first()
+    )
+    if not bid:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Bid not found for this case",
+        )
+
+    is_owner = (case.user_id == current_user.id)
+    is_bid_lawyer = (
+        bid.lawyer_profile is not None
+        and bid.lawyer_profile.user_id == current_user.id
+    )
+    is_staff = current_user.role in ["admin", "moderator"]
+
+    if not (is_owner or is_bid_lawyer or is_staff):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to view this discussion thread.",
+        )
+
+    is_open = (case.status == "open") or (case.status == "assigned" and bid.status == "accepted")
+    if not is_open:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={
+                "error": "thread_closed",
+                "message": "This case discussion is closed.",
+            },
+        )
+
+    messages = (
+        db.query(DirectMessage)
+        .filter(DirectMessage.case_id == case.id, DirectMessage.bid_id == bid.id)
+        .order_by(DirectMessage.created_at.asc())
+        .all()
+    )
+
+    # Mark unread messages addressed to current_user as read
+    unread_msgs = [m for m in messages if m.recipient_user_id == current_user.id and not m.is_read]
+    if unread_msgs:
+        for m in unread_msgs:
+            m.is_read = True
+        db.commit()
+
+    return [_serialize_direct_message(m, db) for m in messages]
+
+
+# ==============================================================================
+# 7) Lawyer Tracking: GET /api/lawyer/bids
+# ==============================================================================
+
+@router.get("/lawyer/bids", response_model=List[LawyerBidSummaryResponse])
+def get_lawyer_bids(
+    current_user: User = Depends(require_role("lawyer", "admin")),
+    db: Session = Depends(get_db),
+):
+    """
+    Lawyer views their own bids across all Case Board matters.
+    Returns:
+    - Case info: case_id, case_title, case_status, category, client_name
+    - Bid info: bid_id, proposed_fee, pitch, bid_status, created_at
+    - Resulting consultation info: booking_id (for accepted bids)
+    Ordered by created_at DESC.
+    """
+    profile = (
+        db.query(LawyerProfile)
+        .filter(LawyerProfile.user_id == current_user.id)
+        .first()
+    )
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Lawyer profile not found",
+        )
+
+    bids = (
+        db.query(CaseBid)
+        .filter(CaseBid.lawyer_profile_id == profile.id)
+        .order_by(CaseBid.created_at.desc())
+        .all()
+    )
+
+    results = []
+    for bid in bids:
+        case = bid.case_post or db.query(CasePost).filter(CasePost.id == bid.case_post_id).first()
+        client = case.user if case else None
+        if not client and case:
+            client = db.query(User).filter(User.id == case.user_id).first()
+
+        client_name = client.full_name if client else "Client"
+        case_id = str(case.id) if case else ""
+        case_title = case.title if case else "Untitled Case"
+        case_status = case.status if case else "unknown"
+        category = case.category if case else "General"
+        created_at_str = (
+            bid.created_at.isoformat()
+            if hasattr(bid.created_at, "isoformat")
+            else str(bid.created_at)
+        )
+
+        booking_id = None
+        if bid.status == "accepted" and case:
+            b_match = (
+                db.query(Booking)
+                .filter(
+                    Booking.lawyer_id == profile.id,
+                    Booking.user_id == case.user_id,
+                    or_(
+                        Booking.case_brief.ilike(f"%{bid.id}%"),
+                        Booking.case_brief.ilike(f"%{case.id}%"),
+                        Booking.case_brief.ilike(f"%{case.title}%"),
+                    ),
+                )
+                .order_by(Booking.created_at.desc())
+                .first()
+            )
+            if not b_match:
+                b_match = (
+                    db.query(Booking)
+                    .filter(
+                        Booking.lawyer_id == profile.id,
+                        Booking.user_id == case.user_id,
+                    )
+                    .order_by(Booking.created_at.desc())
+                    .first()
+                )
+            if b_match:
+                booking_id = str(b_match.id)
+
+        results.append(
+            LawyerBidSummaryResponse(
+                case_id=case_id,
+                case_title=case_title,
+                case_status=case_status,
+                category=category,
+                client_name=client_name,
+                bid_id=str(bid.id),
+                proposed_fee=bid.proposed_fee,
+                pitch=bid.pitch_message or "",
+                bid_status=bid.status,
+                created_at=created_at_str,
+                booking_id=booking_id,
+            )
+        )
+
+    return results
+
+
