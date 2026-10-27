@@ -42,8 +42,12 @@ class UserResponse(BaseModel):
     role: str
     status: str
     scopes: Optional[List[str]] = None
+    created_at: Optional[str] = None
     plan: Optional[str] = "user_free"
     is_pro: Optional[bool] = False
+    plan_code: Optional[str] = "user_free"
+    plan_expires_at: Optional[str] = None
+    messages_this_month: Optional[int] = 0
 
     @field_validator("id", mode="before")
     @classmethod
@@ -51,6 +55,13 @@ class UserResponse(BaseModel):
         if isinstance(v, uuid.UUID):
             return str(v)
         return str(v) if v is not None else ""
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def serialize_created_at(cls, v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return str(v) if v is not None else None
 
 
 class Token(BaseModel):
@@ -500,7 +511,7 @@ class LlmConfigUpdate(BaseModel):
         if not self.model_name and self.model:
             self.model_name = self.model
         if not self.model_name:
-            self.model_name = "gemini-1.5-flash"
+            self.model_name = "gemini-2.5-flash"
         return self
 
 
@@ -517,6 +528,8 @@ class LlmConfigResponse(BaseModel):
     disclaimer: Optional[str] = None
     is_active: bool
     created_at: str
+    api_key_status: Optional[Dict[str, bool]] = None
+    credential_status: Optional[Dict[str, Any]] = None
 
     @field_validator("id", mode="before")
     @classmethod
@@ -537,6 +550,36 @@ class LlmConfigResponse(BaseModel):
         if not self.model:
             self.model = self.model_name
         return self
+
+
+class LlmTestPromptRequest(BaseModel):
+    prompt: str = "Test prompt"
+
+
+class LlmTestPromptResponse(BaseModel):
+    response: str
+    reply: Optional[str] = None
+    provider: str
+    model: str
+
+
+class ProviderCredentialUpdate(BaseModel):
+    provider: str
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+
+
+class ProviderCredentialResponse(BaseModel):
+    provider: str
+    has_key: bool
+    source: str  # "db" | "env" | "none"
+    masked_key: Optional[str] = None
+    base_url: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class ProviderCredentialListResponse(BaseModel):
+    credentials: List[ProviderCredentialResponse]
 
 
 class ChatSessionResponse(BaseModel):
@@ -604,7 +647,10 @@ class PlanResponse(BaseModel):
     price: Optional[Any] = None
     target_role: Optional[str] = "user"
     description: Optional[str] = None
+    is_popular: Optional[bool] = False
     popular: Optional[bool] = False
+    sort_order: Optional[int] = 0
+    is_active: Optional[bool] = True
 
     @field_validator("id", mode="before")
     @classmethod
@@ -622,22 +668,10 @@ class PlanResponse(BaseModel):
                 self.target_role = "lawyer"
             else:
                 self.target_role = "user"
-        if not self.description:
-            if self.code == "user_free":
-                self.description = "Essential legal AI guidance and lawyer search for everyday citizens."
-            elif self.code in ["user_pro", "user_pro_monthly"]:
-                self.description = "Deep legal intelligence with BD Penal Code citations & document review."
-            elif self.code == "user_pro_6m":
-                self.description = "Pro features with 6-month continuous access and savings."
-            elif self.code == "user_pro_1y":
-                self.description = "Full Pro access for 1 year with maximum savings."
-            elif self.code == "lawyer_basic":
-                self.description = "Standard listing in the Bangladesh lawyer directory & consultation requests."
-            elif self.code == "lawyer_verified":
-                self.description = "Verified Bar Council badge, priority placement & video meeting suite."
-        if not self.popular:
-            if self.code in ["user_pro", "user_pro_monthly", "lawyer_verified"]:
-                self.popular = True
+        if self.is_popular is not None:
+            self.popular = self.is_popular
+        elif self.popular is not None:
+            self.is_popular = self.popular
         return self
 
 
@@ -724,15 +758,32 @@ class PaymentResponse(BaseModel):
 
 
 class CheckoutRequest(BaseModel):
-    plan_code: str
+    plan_code: Optional[str] = None
+    plan_id: Optional[str] = None
     provider: Optional[str] = None
 
 
 class CheckoutResponse(BaseModel):
-    checkout_url: str
-    status: str
+    checkout_url: Optional[str] = None
+    status: Optional[str] = "initiated"
     subscription_id: Optional[str] = None
     payment_id: Optional[str] = None
+    amount: Optional[float] = None
+    checkout_required: Optional[bool] = None
+    redirect_url: Optional[str] = None
+    session_token: Optional[str] = None
+
+
+class CheckoutSessionRequest(BaseModel):
+    payment_id: str
+    provider: Optional[str] = "simulated"
+
+
+class SimulatedConfirmRequest(BaseModel):
+    session_token: str
+    card_number: str
+    expiry: Optional[str] = None
+    cvc: Optional[str] = None
 
 
 # --- Direct Messaging Schemas ---
@@ -1025,6 +1076,129 @@ class LawyerBidSummaryResponse(BaseModel):
         if v is None:
             return None
         return str(v)
+
+
+class AdminOverviewResponse(BaseModel):
+    total_users: int
+    total_lawyers: int
+    pending_lawyers: int
+    total_bookings: int
+    open_cases: int
+    total_reviews: int
+    monthly_messages: int
+    monthly_revenue_est: float
+    # Backward compatibility aliases
+    active_lawyers: Optional[int] = None
+    pending_verifications: Optional[int] = None
+
+
+class AdminQueryLogResponse(BaseModel):
+    id: str
+    user_name: str
+    plan_code: str
+    created_at: str
+    char_count: int
+
+
+class AdminQueryRevealRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+class AdminQueryRevealResponse(BaseModel):
+    id: str
+    content: str
+
+
+class AdminLawyerApproveRequest(BaseModel):
+    note: Optional[str] = None
+
+
+class AdminLawyerRejectRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+class AdminLawyerGoldRequest(BaseModel):
+    grant: bool
+
+
+class AdminLawyerResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    user_id: str
+    name: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    bar_council_id: Optional[str] = None
+    district: Optional[str] = None
+    specialization: Optional[str] = None
+    years_experience: Optional[int] = 8
+    years_exp: Optional[int] = 8
+    avg_rating: Optional[float] = 0.0
+    review_count: Optional[int] = 0
+    booking_count: Optional[int] = 0
+    verification_status: str
+    verification_paid: bool = False
+    verification_note: Optional[str] = None
+    verification_asset_ids: List[str] = []
+    created_at: Optional[str] = None
+
+
+class AdminPlanActionRequest(BaseModel):
+    action: str  # "grant" | "revoke"
+    duration_days: Optional[int] = 30
+
+
+class AdminUserStatusRequest(BaseModel):
+    status: str  # "active" | "restricted" | "blocked"
+
+
+class AdminUserUsageResponse(BaseModel):
+    plan_code: str
+    messages_this_month: int
+    monthly_limit: Optional[int] = None
+    sessions_count: int
+    bookings_count: int
+    cases_count: int
+    reviews_given: int
+
+
+class ModeratorPromoteRequest(BaseModel):
+    user_id: str
+    scopes: List[str] = Field(default_factory=list)
+
+
+class ModeratorEditRequest(BaseModel):
+    name: str
+    scopes: List[str] = Field(default_factory=list)
+
+
+class PlanCreateRequest(BaseModel):
+    code: str
+    name: str
+    price_monthly: float
+    duration_days: Optional[int] = 30
+    is_active: Optional[bool] = True
+    role: Optional[str] = "user"
+    description: Optional[str] = None
+    features: Optional[List[str]] = Field(default_factory=list)
+    is_popular: Optional[bool] = False
+    sort_order: Optional[int] = 0
+
+
+class PlanEditRequest(BaseModel):
+    name: Optional[str] = None
+    price_monthly: Optional[float] = None
+    duration_days: Optional[int] = None
+    is_active: Optional[bool] = None
+    description: Optional[str] = None
+    features: Optional[List[str]] = None
+    is_popular: Optional[bool] = None
+    sort_order: Optional[int] = None
+
+
+
+
 
 
 

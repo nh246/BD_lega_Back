@@ -275,21 +275,8 @@ def get_lawyers(
     return _enrich_lawyers_bulk(lawyers, db, viewer=current_user, allow_phone=False)
 
 
-@router.get("/admin/lawyers", response_model=List[LawyerResponse])
-def get_admin_lawyers(
-    status_filter: Optional[str] = Query(None, alias="status", description="Filter by verification status"),
-    current_user: User = Depends(require_scope("lawyers:view")),
-    db: Session = Depends(get_db),
-):
-    """
-    Admin listing of all lawyer profiles across all verification states.
-    Requires 'lawyers:view' scope (or admin role).
-    """
-    query = db.query(LawyerProfile)
-    if status_filter:
-        query = query.filter(LawyerProfile.verification_status == status_filter.strip())
-    lawyers = query.order_by(LawyerProfile.created_at.desc()).all()
-    return _enrich_lawyers_bulk(lawyers, db, viewer=current_user, allow_phone=True)
+# Note: Admin lawyer endpoints are located in app/routers/admin.py
+
 
 
 @router.get("/lawyers/{lawyer_id}", response_model=LawyerResponse)

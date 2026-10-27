@@ -263,6 +263,20 @@ async def upload_profile_asset(
     db.commit()
     db.refresh(asset)
 
+    if kind == "verification":
+        try:
+            from app.services.notifications import trigger_admin_notification
+            lawyer_name = current_user.full_name or current_user.email or "Advocate"
+            trigger_admin_notification(
+                db=db,
+                type="lawyer_verification_submitted",
+                title="Lawyer Verification Submitted",
+                message=f"Lawyer {lawyer_name} submitted verification document '{filename}'.",
+                link="/admin/lawyers",
+            )
+        except Exception:
+            pass
+
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
         content={

@@ -31,5 +31,14 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
 # Payments
-PAYMENT_PROVIDER = os.getenv("PAYMENT_PROVIDER", "stripe")
+PAYMENT_PROVIDER = os.getenv("PAYMENT_PROVIDER", "simulated")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+
+# SSLCommerz Configuration
+SSLCZ_STORE_ID = os.getenv("SSLCZ_STORE_ID", "")
+SSLCZ_STORE_PASSWD = os.getenv("SSLCZ_STORE_PASSWD", "")
+SSLCZ_SANDBOX = os.getenv("SSLCZ_SANDBOX", "true").strip().lower() in ("true", "1", "yes")
+
+# Service URLs
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")

@@ -176,20 +176,20 @@ def send_chat_message(
         system_prompt = config.system_prompt or "You are an AI legal assistant specialized in the laws of Bangladesh."
         disclaimer = config.disclaimer or "This information is for educational purposes and not a substitute for professional legal advice."
     else:
-        provider = "mock"
-        model = "mock-model"
+        provider = "gemini"
+        model = "gemini-2.5-flash"
         temp = 0.7
         max_tokens = 2048
         system_prompt = "You are an AI legal assistant specialized in the laws of Bangladesh."
         disclaimer = "This information is for educational purposes and not a substitute for professional legal advice."
 
     # Check vision support for image attachments
-    if image_parts and provider != "gemini":
+    if image_parts and provider not in ["gemini", "openai", "anthropic", "mock"]:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={
                 "error": "vision_unsupported",
-                "message": "Image analysis requires the Gemini provider. Ask the admin to switch model provider.",
+                "message": f"Image analysis is not supported for provider '{provider}'.",
             },
         )
 
@@ -262,6 +262,9 @@ def send_chat_message(
                 "detail": "AI service temporarily unavailable. Please try again.",
             },
         )
+
+    if disclaimer and disclaimer not in reply_text:
+        reply_text = f"{reply_text}\n\n{disclaimer}"
 
     # Self-evaluate confidence for Pro plans
     confidence = None

@@ -98,6 +98,8 @@ def on_startup():
                     conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN meeting_provider VARCHAR(100)"))
                 if 'meeting_link' not in cols:
                     conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN meeting_link VARCHAR(500)"))
+                if 'verification_note' not in cols:
+                    conn.execute(text("ALTER TABLE lawyer_profiles ADD COLUMN verification_note TEXT"))
                 conn.commit()
 
         if inspector.has_table('bookings'):
@@ -130,6 +132,16 @@ def on_startup():
             with engine.connect() as conn:
                 if 'duration_days' not in plan_cols:
                     conn.execute(text("ALTER TABLE plans ADD COLUMN duration_days INTEGER DEFAULT 30"))
+                if 'is_active' not in plan_cols:
+                    conn.execute(text("ALTER TABLE plans ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT TRUE"))
+                if 'features' not in plan_cols:
+                    conn.execute(text("ALTER TABLE plans ADD COLUMN features JSON DEFAULT '[]'::json"))
+                if 'description' not in plan_cols:
+                    conn.execute(text("ALTER TABLE plans ADD COLUMN description TEXT"))
+                if 'is_popular' not in plan_cols:
+                    conn.execute(text("ALTER TABLE plans ADD COLUMN is_popular BOOLEAN NOT NULL DEFAULT FALSE"))
+                if 'sort_order' not in plan_cols:
+                    conn.execute(text("ALTER TABLE plans ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"))
                 conn.commit()
 
         if inspector.has_table('direct_messages'):

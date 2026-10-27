@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
 
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_role
+from app.core.deps import get_current_user, require_role, check_account_restriction
 from app.core.plans import get_user_plan, is_pro_plan
 from app.models import (
     Booking,
@@ -204,6 +204,10 @@ def create_case_post(
     - CHECK PLAN: Must be active Pro plan ("user_pro_monthly", "user_pro_6m", "user_pro_1y", "user_pro").
     - If Free user: return 403 {"error":"pro_required","message":"Posting cases to the Case Board is a Pro feature."}
     """
+    restriction = check_account_restriction(current_user)
+    if restriction:
+        return restriction
+
     if current_user.role != "user":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -357,6 +361,10 @@ def submit_case_bid(
     - Case status must be "open".
     - Create CaseBid row.
     """
+    restriction = check_account_restriction(current_user)
+    if restriction:
+        return restriction
+
     if current_user.role not in ["lawyer", "admin"]:
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -730,6 +738,10 @@ def send_case_bid_message(
     - Otherwise return 403 {"error":"thread_closed", "message":"This case discussion is closed."}.
     - Anyone else (including other bidding lawyers): 403.
     """
+    restriction = check_account_restriction(current_user)
+    if restriction:
+        return restriction
+
     case_uuid = _parse_uuid(case_id, label="Case")
     bid_uuid = _parse_uuid(bid_id, label="Bid")
 

@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_role
+from app.core.deps import get_current_user, require_role, check_account_restriction
 from app.models import Booking, LawyerProfile, Schedule, User, Subscription, Plan, AuditLog
 from app.schemas import BookingCreate, BookingPaymentSubmit, BookingResponse, BookingUpdate
 from app.audit import log_audit
@@ -75,6 +75,10 @@ def create_booking(
     Depends on require_role("user").
     Supports both direct schedule_id booking or lawyer_id + slot booking.
     """
+    restriction = check_account_restriction(current_user)
+    if restriction:
+        return restriction
+
     schedule = None
 
     if booking_in.schedule_id:
@@ -426,24 +430,28 @@ def update_lawyer_booking(
     if target_status == "declined":
         target_status = "cancelled"
 
-    if target_status not in ["confirmed", "cancelled"]:
+    if target_status not in ["confirmed", "cancelled", "refund_due"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid status. Must be 'confirmed' or 'cancelled'",
+            detail="Invalid status. Must be 'confirmed', 'cancelled', or 'refund_due'",
         )
 
     old_status = booking.status
     booking.status = target_status
 
-    # If status changed to cancelled, reopen the schedule slot
-    if target_status == "cancelled" and booking.schedule:
+    # If status changed to cancelled or refund_due, reopen the schedule slot
+    if target_status in ["cancelled", "refund_due"] and booking.schedule:
         booking.schedule.is_booked = False
 
     db.commit()
     db.refresh(booking)
 
     # Audit logging
-    audit_action = "booking_confirmed" if target_status == "confirmed" else "booking_cancelled"
+    audit_action = (
+        "booking_confirmed"
+        if target_status == "confirmed"
+        else ("booking_refund_flagged" if target_status == "refund_due" else "booking_cancelled")
+    )
     log_audit(
         db=db,
         actor_id=current_user.id,
@@ -457,6 +465,20 @@ def update_lawyer_booking(
             "lawyer_id": str(booking.lawyer_id),
         },
     )
+
+    if target_status == "refund_due":
+        try:
+            from app.services.notifications import trigger_admin_notification
+            client_name = booking.user.full_name if booking.user else "Client"
+            trigger_admin_notification(
+                db=db,
+                type="refund_flagged",
+                title="Booking Refund Flagged",
+                message=f"Booking #{str(booking.id)[:8]} for client {client_name} marked refund_due.",
+                link="/admin",
+            )
+        except Exception:
+            pass
 
     if target_status == "confirmed":
         lawyer_name = booking.lawyer.name if booking.lawyer and booking.lawyer.name else "Advocate"
@@ -512,14 +534,14 @@ def client_cancel_booking(
         )
 
     target_status = update_data.status.strip().lower()
-    if target_status not in ["cancelled", "declined"]:
+    if target_status not in ["cancelled", "declined", "refund_due"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Clients can only cancel bookings with status 'cancelled'",
+            detail="Status must be 'cancelled' or 'refund_due'",
         )
 
     old_status = booking.status
-    booking.status = "cancelled"
+    booking.status = "refund_due" if target_status == "refund_due" else "cancelled"
 
     if booking.schedule:
         booking.schedule.is_booked = False
@@ -530,16 +552,30 @@ def client_cancel_booking(
     log_audit(
         db=db,
         actor_id=current_user.id,
-        action="booking_cancelled",
+        action="booking_refund_flagged" if target_status == "refund_due" else "booking_cancelled",
         target_type="booking",
         target_id=str(booking.id),
         details={
             "old_status": old_status,
-            "new_status": "cancelled",
+            "new_status": booking.status,
             "cancelled_by": "client" if is_owner else "admin",
             "schedule_id": str(booking.schedule_id),
         },
     )
+
+    if target_status == "refund_due":
+        try:
+            from app.services.notifications import trigger_admin_notification
+            client_name = booking.user.full_name if booking.user else "Client"
+            trigger_admin_notification(
+                db=db,
+                type="refund_flagged",
+                title="Booking Refund Flagged",
+                message=f"Booking #{str(booking.id)[:8]} for client {client_name} marked refund_due.",
+                link="/admin",
+            )
+        except Exception:
+            pass
 
     return booking
 

@@ -60,6 +60,7 @@ class LawyerProfile(Base):
     # verification_status: pending | approved | rejected
     verification_status = Column(String(50), default="pending", nullable=False)
     verification_paid = Column(Boolean, default=False, nullable=False)
+    verification_note = Column(Text, nullable=True)
     hourly_rate = Column(Integer, default=2000, nullable=True)
     years_exp = Column(Integer, default=8, nullable=True)
     languages = Column(String(255), default="Bangla, English", nullable=True)
@@ -197,6 +198,17 @@ class LlmConfig(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class ProviderCredential(Base):
+    __tablename__ = "provider_credentials"
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    # provider: gemini | openai | anthropic | openrouter | mock
+    provider = Column(String(50), unique=True, index=True, nullable=False)
+    api_key = Column(Text, nullable=True)
+    base_url = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 class Plan(Base):
     __tablename__ = "plans"
 
@@ -206,7 +218,11 @@ class Plan(Base):
     name = Column(String(255), nullable=False)
     price_monthly = Column(Float, default=0.0, nullable=False)
     duration_days = Column(Integer, default=30, nullable=True)
-    features = Column(JSON, nullable=True)
+    features = Column(JSON, default=list, nullable=True)
+    description = Column(Text, nullable=True)
+    is_popular = Column(Boolean, default=False, nullable=False)
+    sort_order = Column(Integer, default=0, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
 
     @property
     def target_role(self) -> str:

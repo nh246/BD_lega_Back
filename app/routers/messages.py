@@ -14,7 +14,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import require_role
+from app.core.deps import require_role, check_account_restriction
 from app.core.plans import get_user_plan, is_pro_plan
 from app.models import DirectMessage, LawyerProfile, User, Booking, ProfileAsset
 from app.services.notifications import trigger_notification
@@ -243,6 +243,10 @@ def reply_to_citizen(
     - If status == "completed": return 403 {"error":"booking_completed","message":"This consultation is completed. Thread is read-only."}
     - Supports up to 4 attachments.
     """
+    restriction = check_account_restriction(current_user)
+    if restriction:
+        return restriction
+
     profile = (
         db.query(LawyerProfile)
         .filter(LawyerProfile.user_id == current_user.id)
@@ -354,6 +358,10 @@ def send_message_to_lawyer(
     - If no booking exists: return 403 {"error":"no_booking", ...}.
     - Supports up to 4 attachments.
     """
+    restriction = check_account_restriction(current_user)
+    if restriction:
+        return restriction
+
     lawyer_uuid = _parse_uuid(lawyer_id, "Lawyer profile")
     lawyer = (
         db.query(LawyerProfile)

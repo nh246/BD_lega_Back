@@ -41,3 +41,35 @@ def trigger_notification(
     db.commit()
     db.refresh(notif)
     return notif
+
+
+def trigger_admin_notification(
+    db: Session,
+    type: str,
+    title: str,
+    message: str,
+    link: Optional[str] = None,
+):
+    """
+    Creates an in-app notification row for all administrators and moderators.
+    """
+    from app.models import User
+    admins = db.query(User).filter(User.role.in_(["admin", "moderator"])).all()
+    created = []
+    for admin in admins:
+        notif = Notification(
+            id=uuid.uuid4(),
+            user_id=admin.id,
+            type=type,
+            title=title,
+            message=message,
+            link=link,
+            is_read=False,
+        )
+        db.add(notif)
+        created.append(notif)
+    if created:
+        db.commit()
+        for notif in created:
+            db.refresh(notif)
+    return created

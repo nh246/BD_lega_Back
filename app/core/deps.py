@@ -73,6 +73,25 @@ def get_current_user(
     return user
 
 
+def check_account_restriction(user: Optional[User]):
+    """
+    Checks if user account is restricted.
+    Returns 403 JSONResponse with 'account_restricted' if restricted, else None.
+    """
+    if user and getattr(user, "status", None) == "restricted":
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={
+                "error": "account_restricted",
+                "message": "Your account is restricted. Contact support.",
+                "detail": "Your account is restricted. Contact support.",
+            },
+        )
+    return None
+
+
+
 def require_role(*allowed_roles: str) -> Callable:
     """
     Returns a dependency verifying current_user.role is within allowed_roles.
@@ -93,15 +112,17 @@ def require_scope(scope: str) -> Callable:
     """
     Returns a dependency verifying that the user has the required permission scope.
     Admins automatically possess all scopes.
-    Raises 403 if missing required scope.
+    Moderators must have the specific scope in their user.scopes list.
+    Raises 403 if missing required scope or invalid role.
     """
     def scope_checker(current_user: User = Depends(get_current_user)) -> User:
         if current_user.role == "admin":
             return current_user
 
-        user_scopes = current_user.scopes or []
-        if isinstance(user_scopes, list) and scope in user_scopes:
-            return current_user
+        if current_user.role == "moderator":
+            user_scopes = current_user.scopes or []
+            if isinstance(user_scopes, list) and scope in user_scopes:
+                return current_user
 
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
