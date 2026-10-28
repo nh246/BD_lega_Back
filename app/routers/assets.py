@@ -13,7 +13,8 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user, get_optional_current_user
-from app.models import Booking, LawyerProfile, ProfileAsset, User
+from app.models import Booking, CaseBid, CasePost, DirectMessage, LawyerProfile, ProfileAsset, User
+from sqlalchemy import cast, String
 
 router = APIRouter(tags=["Assets"])
 
@@ -97,6 +98,7 @@ def _check_verification_access(
 async def upload_profile_asset(
     kind: str = Form(...),
     file: UploadFile = File(...),
+    slot: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -105,6 +107,7 @@ async def upload_profile_asset(
     - 'avatar': images only (png/jpg/jpeg/webp), max 1 MB. Replaces previous avatar.
     - 'verification': pdf/png/jpg/jpeg, max 2 MB. Max 3 verification docs per user.
     - 'payment_screenshot': images only (png/jpg/jpeg/webp), max 2 MB. No count limit.
+    - 'slot': Optional slot name for verification docs ('nid', 'bar_council_cert', 'practicing_license').
     """
     if kind not in ("avatar", "verification", "payment_screenshot", "text", "image"):
         raise HTTPException(
@@ -224,6 +227,25 @@ async def upload_profile_asset(
                 detail="Invalid MIME type for verification document.",
             )
 
+        # Slot-based replacement for lawyers
+        clean_slot = slot.strip().lower() if slot else None
+        lawyer_prof = None
+        if current_user.role == "lawyer":
+            lawyer_prof = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+            if lawyer_prof and clean_slot in ("nid", "bar_council_cert", "practicing_license"):
+                current_checklist = dict(lawyer_prof.verification_checklist or {})
+                old_asset_id = current_checklist.get(clean_slot)
+                if old_asset_id:
+                    try:
+                        old_aid = uuid.UUID(str(old_asset_id))
+                        db.query(ProfileAsset).filter(
+                            ProfileAsset.id == old_aid,
+                            ProfileAsset.owner_user_id == current_user.id,
+                        ).delete()
+                        db.commit()
+                    except Exception:
+                        pass
+
         # Max 3 verification rows per user, else 400 {"error":"limit","message":"Maximum 3 verification documents."}
         verif_count = (
             db.query(ProfileAsset)
@@ -263,19 +285,23 @@ async def upload_profile_asset(
     db.commit()
     db.refresh(asset)
 
-    if kind == "verification":
-        try:
-            from app.services.notifications import trigger_admin_notification
-            lawyer_name = current_user.full_name or current_user.email or "Advocate"
-            trigger_admin_notification(
-                db=db,
-                type="lawyer_verification_submitted",
-                title="Lawyer Verification Submitted",
-                message=f"Lawyer {lawyer_name} submitted verification document '{filename}'.",
-                link="/admin/lawyers",
-            )
-        except Exception:
-            pass
+    if kind == "verification" and current_user.role == "lawyer":
+        lawyer_prof = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+        if lawyer_prof:
+            clean_slot = slot.strip().lower() if slot else None
+            checklist = dict(lawyer_prof.verification_checklist or {})
+            if clean_slot in ("nid", "bar_council_cert", "practicing_license"):
+                checklist[clean_slot] = str(asset.id)
+            else:
+                # If no slot provided, fill first empty slot
+                for s in ("nid", "bar_council_cert", "practicing_license"):
+                    if not checklist.get(s):
+                        checklist[s] = str(asset.id)
+                        clean_slot = s
+                        break
+            lawyer_prof.verification_checklist = checklist
+            db.commit()
+            db.refresh(lawyer_prof)
 
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
@@ -285,6 +311,8 @@ async def upload_profile_asset(
             "filename": asset.filename,
             "mime_type": asset.mime_type,
             "size_bytes": asset.size_bytes,
+            "slot": slot,
+            "checklist": lawyer_prof.verification_checklist if (kind == "verification" and lawyer_prof) else None,
         },
     )
 
@@ -373,17 +401,37 @@ def get_user_assets(
     ]
 
 
+def _stream_asset(asset: ProfileAsset) -> StreamingResponse:
+    return StreamingResponse(
+        io.BytesIO(asset.file_bytes),
+        media_type=asset.mime_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": f'inline; filename="{asset.filename}"'
+        },
+    )
+
+
 @router.get("/api/assets/{asset_id}/file")
 def get_asset_file(
     asset_id: str,
-    requester: Optional[User] = Depends(get_optional_current_user),
+    requester: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
-    Stream asset file contents:
-    - avatar rows are public.
-    - verification rows accessible only if requester == owner, OR requester is admin/moderator,
-      OR owner has an approved lawyer_profile. Otherwise return 404 (do not reveal existence).
+    Stream asset file contents.
+    Visibility permission rules (in order):
+    1. Owner of the asset -> allow
+    2. admin / moderator -> allow
+    3. Asset id present in a CasePost.attachment_asset_ids AND requester is
+       the case owner OR a lawyer who has a CaseBid on that case -> allow
+    4. Asset id present in any DirectMessage.attachment_asset_ids AND
+       requester is a participant of that thread (sender/recipient; for case
+       discussion threads: case owner or the bid's lawyer) -> allow
+    5. Avatar rows -> allow for authenticated users
+    6. Payment screenshots -> allow for assigned booking lawyer
+    7. Verification rows -> allow if owner has an approved lawyer profile
+    8. else -> 404 (never leak existence)
+    Unauthenticated requests are rejected with 401 via get_current_user dependency.
     """
     try:
         aid = uuid.UUID(str(asset_id))
@@ -400,109 +448,118 @@ def get_asset_file(
             detail="Asset not found",
         )
 
-    # Check if this asset is attached to any DirectMessage between user A and lawyer B
-    from app.models import DirectMessage
-    from sqlalchemy import cast, String
+    # 1. Owner of the asset
+    if asset.owner_user_id == requester.id:
+        return _stream_asset(asset)
 
-    dm_matches = (
-        db.query(DirectMessage)
-        .filter(cast(DirectMessage.attachments, String).like(f"%{asset.id}%"))
+    # 2. admin / moderator
+    if requester.role in ("admin", "moderator"):
+        return _stream_asset(asset)
+
+    aid_str = str(asset.id)
+
+    # 3. Asset id present in CasePost.attachment_asset_ids
+    # AND requester is the case owner OR a lawyer who has a CaseBid on that case
+    matching_cases = (
+        db.query(CasePost)
+        .filter(cast(CasePost.attachment_asset_ids, String).like(f"%{aid_str}%"))
         .all()
     )
+    for case in matching_cases:
+        case_asset_ids = [str(x) for x in (case.attachment_asset_ids or [])]
+        if aid_str in case_asset_ids:
+            # Case owner
+            if case.user_id == requester.id:
+                return _stream_asset(asset)
 
-    is_dm_attachment = False
-    is_dm_authorized = False
-
-    if dm_matches:
-        for dm in dm_matches:
-            att_list = dm.attachments or []
-            if str(asset.id) in [str(x) for x in att_list]:
-                is_dm_attachment = True
-                if requester:
-                    if requester.role in ["admin", "moderator"]:
-                        is_dm_authorized = True
-                        break
-                    lawyer_user_id = None
-                    if dm.lawyer_profile:
-                        lawyer_user_id = dm.lawyer_profile.user_id
-                    else:
-                        lp = db.query(LawyerProfile).filter(LawyerProfile.id == dm.lawyer_profile_id).first()
-                        if lp:
-                            lawyer_user_id = lp.user_id
-
-                    allowed_users = {dm.sender_user_id, dm.recipient_user_id, lawyer_user_id}
-                    allowed_users.discard(None)
-                    if requester.id in allowed_users:
-                        is_dm_authorized = True
-                        break
-
-    if is_dm_attachment:
-        if not is_dm_authorized:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Asset not found",
-            )
-    elif asset.kind == "avatar":
-        # Avatars are public
-        pass
-    elif asset.kind == "verification":
-        if not _check_verification_access(db, asset.owner_user_id, requester):
-            # Violation -> 404 (do not reveal existence)
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Asset not found",
-            )
-    elif asset.kind == "payment_screenshot":
-        if not requester:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Asset not found",
-            )
-        is_owner = requester.id == asset.owner_user_id
-        is_staff = requester.role in ["admin", "moderator"]
-        is_assigned_lawyer = False
-        if requester.role == "lawyer":
-            lawyer_prof = db.query(LawyerProfile).filter(LawyerProfile.user_id == requester.id).first()
-            if lawyer_prof:
-                is_assigned_lawyer = (
-                    db.query(Booking)
-                    .filter(
-                        Booking.screenshot_asset_id == asset.id,
-                        Booking.lawyer_id == lawyer_prof.id,
-                    )
+            # Lawyer who has a CaseBid on that case
+            if requester.role == "lawyer":
+                lawyer_prof = (
+                    db.query(LawyerProfile)
+                    .filter(LawyerProfile.user_id == requester.id)
                     .first()
-                    is not None
                 )
-        if not (is_owner or is_staff or is_assigned_lawyer):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Asset not found",
-            )
-    elif asset.kind in ("text", "image"):
-        if not requester:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Asset not found",
-            )
-        is_owner = requester.id == asset.owner_user_id
-        is_staff = requester.role in ["admin", "moderator"]
-        if not (is_owner or is_staff):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Asset not found",
-            )
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Asset not found",
-        )
+                if lawyer_prof:
+                    bid = (
+                        db.query(CaseBid)
+                        .filter(
+                            CaseBid.case_id == case.id,
+                            CaseBid.lawyer_profile_id == lawyer_prof.id,
+                        )
+                        .first()
+                    )
+                    if bid:
+                        return _stream_asset(asset)
 
-    return StreamingResponse(
-        io.BytesIO(asset.file_bytes),
-        media_type=asset.mime_type or "application/octet-stream",
-        headers={
-            "Content-Disposition": f'inline; filename="{asset.filename}"'
-        },
+    # 4. Asset id present in any DirectMessage.attachment_asset_ids (attachments)
+    # AND requester is a participant of that thread (sender/recipient; for case discussion threads: case owner or bid's lawyer)
+    matching_dms = (
+        db.query(DirectMessage)
+        .filter(cast(DirectMessage.attachments, String).like(f"%{aid_str}%"))
+        .all()
+    )
+    for dm in matching_dms:
+        dm_att_ids = [str(x) for x in (dm.attachments or [])]
+        if aid_str in dm_att_ids:
+            # Sender or recipient
+            if requester.id in (dm.sender_user_id, dm.recipient_user_id):
+                return _stream_asset(asset)
+
+            # Lawyer profile of the direct message
+            if dm.lawyer_profile_id:
+                lp = db.query(LawyerProfile).filter(LawyerProfile.id == dm.lawyer_profile_id).first()
+                if lp and lp.user_id == requester.id:
+                    return _stream_asset(asset)
+
+            # Case discussion threads: case owner or bid's lawyer
+            if dm.case_id:
+                case = db.query(CasePost).filter(CasePost.id == dm.case_id).first()
+                if case and case.user_id == requester.id:
+                    return _stream_asset(asset)
+
+            if dm.bid_id:
+                bid = db.query(CaseBid).filter(CaseBid.id == dm.bid_id).first()
+                if bid:
+                    lp = db.query(LawyerProfile).filter(LawyerProfile.id == bid.lawyer_profile_id).first()
+                    if lp and lp.user_id == requester.id:
+                        return _stream_asset(asset)
+
+    # 5. Avatar rows are viewable by authenticated users
+    if asset.kind == "avatar":
+        return _stream_asset(asset)
+
+    # 6. Payment screenshot rows are viewable by the assigned booking lawyer
+    if asset.kind == "payment_screenshot" and requester.role == "lawyer":
+        lawyer_prof = db.query(LawyerProfile).filter(LawyerProfile.user_id == requester.id).first()
+        if lawyer_prof:
+            booking = (
+                db.query(Booking)
+                .filter(
+                    Booking.screenshot_asset_id == asset.id,
+                    Booking.lawyer_id == lawyer_prof.id,
+                )
+                .first()
+            )
+            if booking:
+                return _stream_asset(asset)
+
+    # 7. Verification rows are viewable if the lawyer has an approved profile
+    if asset.kind == "verification":
+        approved_lawyer = (
+            db.query(LawyerProfile)
+            .filter(
+                LawyerProfile.user_id == asset.owner_user_id,
+                LawyerProfile.verification_status == "approved",
+            )
+            .first()
+        )
+        if approved_lawyer:
+            return _stream_asset(asset)
+
+    # 8. Otherwise -> 404 (never leak existence)
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Asset not found",
     )
 
 
@@ -536,6 +593,18 @@ def delete_profile_asset(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Asset not found",
         )
+
+    if current_user.role == "lawyer":
+        lawyer_prof = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+        if lawyer_prof and lawyer_prof.verification_checklist:
+            checklist = dict(lawyer_prof.verification_checklist)
+            changed = False
+            for k, v in list(checklist.items()):
+                if v == str(asset.id):
+                    checklist[k] = None
+                    changed = True
+            if changed:
+                lawyer_prof.verification_checklist = checklist
 
     db.delete(asset)
     db.commit()

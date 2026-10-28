@@ -26,6 +26,20 @@ class UserUpdate(BaseModel):
     status: Optional[str] = None
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+
 class ModeratorCreate(BaseModel):
     email: EmailStr
     full_name: str
@@ -122,6 +136,10 @@ class LawyerListResponse(BaseModel):
     presence_status: Optional[str] = "available"
     avg_rating: Optional[float] = None
     review_count: Optional[int] = 0
+    verification_checklist: Optional[Dict[str, Optional[str]]] = None
+    verification_note: Optional[str] = None
+    bio: Optional[str] = None
+    description: Optional[str] = None
 
     @field_validator("id", mode="before")
     @classmethod
@@ -168,6 +186,7 @@ class LawyerResponse(LawyerListResponse):
 
 class LawyerUpdate(BaseModel):
     name: Optional[str] = None
+    full_name: Optional[str] = None
     district: Optional[str] = None
     specialization: Optional[str] = None
     phone: Optional[str] = None
@@ -175,6 +194,15 @@ class LawyerUpdate(BaseModel):
     hourly_rate: Optional[int] = None
     years_exp: Optional[int] = None
     languages: Optional[str] = None
+    bio: Optional[str] = None
+    description: Optional[str] = None
+    bar_council_id: Optional[str] = None
+    bar_council_no: Optional[str] = None
+    verification_checklist: Optional[Dict[str, Optional[str]]] = None
+    payment_methods: Optional[List[Dict[str, Any]]] = None
+    payment_instructions: Optional[str] = None
+    meeting_provider: Optional[str] = None
+    meeting_link: Optional[str] = None
 
 
 class FirmResponse(BaseModel):
@@ -243,7 +271,7 @@ class BookingResponse(BaseModel):
     id: str
     user_id: str
     lawyer_id: str
-    schedule_id: str
+    schedule_id: Optional[str] = None
     status: str
     created_at: str
     lawyer_name: Optional[str] = None
@@ -270,11 +298,18 @@ class BookingResponse(BaseModel):
     bid_id: Optional[str] = None
     case_title: Optional[str] = None
 
-    @field_validator("id", "user_id", "lawyer_id", "schedule_id", "case_id", "bid_id", mode="before")
+    @field_validator("id", "user_id", "lawyer_id", mode="before")
     @classmethod
-    def serialize_uuid(cls, v):
+    def serialize_required_uuid(cls, v):
         if v is None:
             return ""
+        return str(v)
+
+    @field_validator("schedule_id", "case_id", "bid_id", mode="before")
+    @classmethod
+    def serialize_optional_uuid(cls, v):
+        if v is None or v == "":
+            return None
         return str(v)
 
     @field_validator("screenshot_asset_id", mode="before")

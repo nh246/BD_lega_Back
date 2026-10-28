@@ -2,7 +2,9 @@
 Authentication router: Registration, Login, Token generation, and Current User endpoints.
 """
 
+import os
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
@@ -12,16 +14,28 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user
-from app.core.security import get_password_hash, verify_password, create_access_token
+from app.core.security import (
+    get_password_hash,
+    verify_password,
+    create_access_token,
+    create_password_reset_token,
+    decode_password_reset_token,
+)
 from app.models import User, LawyerProfile
-from app.schemas import UserCreate, UserLogin, UserResponse, Token, AuthResponse
+from app.schemas import (
+    UserCreate,
+    UserLogin,
+    UserResponse,
+    Token,
+    AuthResponse,
+    ChangePasswordRequest,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+)
 from app.audit import log_audit
-from app.core.plans import get_user_plan
+from app.core.plans import get_user_plan, is_pro_plan
 
 router = APIRouter(prefix="/api/auth", tags=["Auth"])
-
-
-from app.core.plans import get_user_plan, is_pro_plan
 
 
 def _make_user_response(db: Session, user: User) -> UserResponse:
@@ -273,4 +287,195 @@ def update_me(
         "full_name": current_user.full_name,
         "role": current_user.role,
     }
+
+
+@router.post("/change-password")
+def change_password(
+    data: ChangePasswordRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Changes the authenticated user's password.
+    Requires current_password to match user's existing hashed password.
+    """
+    if not verify_password(data.current_password, current_user.password_hash):
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "error": "current_password_incorrect",
+                "message": "Current password is incorrect.",
+            },
+        )
+
+    current_user.password_hash = get_password_hash(data.new_password)
+    db.commit()
+
+    log_audit(
+        db=db,
+        actor_id=current_user.id,
+        action="password_changed",
+        target_type="user",
+        target_id=current_user.id,
+    )
+
+    return {"message": "Password updated successfully"}
+
+
+@router.post("/forgot-password")
+def forgot_password(
+    data: ForgotPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Initiates password reset for a given email address.
+    Generates a 30-minute JWT reset token.
+    If SMTP env vars exist, sends real email; otherwise returns reset_url in demo mode.
+    """
+    normalized_email = data.email.lower().strip()
+    user = db.query(User).filter(User.email == normalized_email).first()
+
+    if not user:
+        # Don't leak existence of the email account
+        return {"message": "If that email is registered, a password reset link has been sent."}
+
+    # Generate JWT reset token (expires in 30 minutes)
+    reset_token = create_password_reset_token(user.email)
+    now = datetime.now(timezone.utc)
+    user.reset_token = reset_token
+    user.reset_token_expires_at = now + timedelta(minutes=30)
+    db.commit()
+
+    log_audit(
+        db=db,
+        actor_id=user.id,
+        action="password_reset_requested",
+        target_type="user",
+        target_id=user.id,
+        details={"email": user.email},
+    )
+
+    reset_url = f"/reset-password?token={reset_token}"
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+    full_reset_link = f"{frontend_url}{reset_url}"
+
+    # Check for SMTP configuration (SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, etc.)
+    smtp_host = os.getenv("SMTP_HOST") or os.getenv("SMTP_SERVER")
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    smtp_port = int(os.getenv("SMTP_PORT", 587))
+    smtp_from = os.getenv("SMTP_FROM", smtp_user or "noreply@bdlegal.ai")
+
+    if smtp_host and smtp_user:
+        try:
+            import smtplib
+            from email.mime.text import MIMEText
+            from email.mime.multipart import MIMEMultipart
+
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = "Password Reset Request - BD Legal AI"
+            msg["From"] = smtp_from
+            msg["To"] = user.email
+
+            body = (
+                f"Hello {user.full_name},\n\n"
+                f"A password reset was requested for your BD Legal AI account.\n"
+                f"Please click the link below to set a new password:\n\n"
+                f"{full_reset_link}\n\n"
+                f"This link expires in 30 minutes.\n"
+                f"If you did not make this request, you can safely ignore this email.\n"
+            )
+            msg.attach(MIMEText(body, "plain"))
+
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
+                server.starttls()
+                if smtp_password:
+                    server.login(smtp_user, smtp_password)
+                server.sendmail(smtp_from, [user.email], msg.as_string())
+
+            return {"message": "Password reset link sent to your email."}
+        except Exception:
+            # Fallback to demo mode if SMTP connection fails
+            return {
+                "reset_url": reset_url,
+                "message": "Reset link generated. In production, this would be emailed.",
+            }
+
+    # Demo mode: return reset_url directly
+    return {
+        "reset_url": reset_url,
+        "message": "Reset link generated. In production, this would be emailed.",
+    }
+
+
+@router.post("/reset-password")
+def reset_password(
+    data: ResetPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Confirms password reset using the token.
+    Validates token, updates password, and clears reset_token.
+    """
+    try:
+        payload = decode_password_reset_token(data.token)
+    except Exception:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "error": "invalid_or_expired_token",
+                "message": "Invalid or expired reset token.",
+            },
+        )
+
+    email = payload.get("sub")
+    if not email:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "error": "invalid_or_expired_token",
+                "message": "Invalid or expired reset token.",
+            },
+        )
+
+    user = db.query(User).filter(User.email == email.lower().strip()).first()
+    if not user or not user.reset_token or user.reset_token != data.token:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "error": "invalid_or_expired_token",
+                "message": "Invalid or expired reset token.",
+            },
+        )
+
+    # Check reset_token_expires_at if stored
+    if user.reset_token_expires_at:
+        exp_at = user.reset_token_expires_at
+        if exp_at.tzinfo is None:
+            exp_at = exp_at.replace(tzinfo=timezone.utc)
+        if exp_at < datetime.now(timezone.utc):
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "error": "invalid_or_expired_token",
+                    "message": "Invalid or expired reset token.",
+                },
+            )
+
+    user.password_hash = get_password_hash(data.new_password)
+    user.reset_token = None
+    user.reset_token_expires_at = None
+    db.commit()
+
+    log_audit(
+        db=db,
+        actor_id=user.id,
+        action="password_reset_completed",
+        target_type="user",
+        target_id=user.id,
+        details={"email": user.email},
+    )
+
+    return {"message": "Password reset successful. You can now log in."}
+
 

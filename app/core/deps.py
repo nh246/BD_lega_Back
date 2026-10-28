@@ -108,6 +108,36 @@ def require_role(*allowed_roles: str) -> Callable:
     return role_checker
 
 
+class UnverifiedLawyerException(HTTPException):
+    def __init__(self, message: str = "Please complete verification to access this feature."):
+        super().__init__(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "unverified_lawyer", "message": message},
+        )
+
+
+def require_verified_lawyer(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> User:
+    """
+    Ensures that if the current user is a lawyer, their lawyer profile must be approved.
+    Raises 403 {"error":"unverified_lawyer", "message":"Please complete verification to access this feature."}
+    if unverified.
+    """
+    if current_user.role == "lawyer":
+        from app.models import LawyerProfile
+        profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+        if not profile or profile.verification_status != "approved":
+            raise UnverifiedLawyerException()
+    elif current_user.role not in ("admin", "moderator"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permissions",
+        )
+    return current_user
+
+
 def require_scope(scope: str) -> Callable:
     """
     Returns a dependency verifying that the user has the required permission scope.

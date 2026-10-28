@@ -3,12 +3,15 @@ BD Legal Guide AI — Backend API
 Entrypoint with database initialization and health check.
 """
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.core.database import Base, engine, get_db
+from app.core.deps import UnverifiedLawyerException
+from app.core.config import FRONTEND_URL
 import app.models  # Ensure all 12 models are registered with Base.metadata
 from app.routers.auth import router as auth_router
 from app.routers.admin import router as admin_router
@@ -28,14 +31,30 @@ from app.routers.cases import router as cases_router
 
 app = FastAPI(title="BD Legal Guide AI API")
 
+@app.exception_handler(UnverifiedLawyerException)
+async def unverified_lawyer_exception_handler(request: Request, exc: UnverifiedLawyerException):
+    return JSONResponse(
+        status_code=403,
+        content={
+            "error": "unverified_lawyer",
+            "message": "Please complete verification to access this feature.",
+            "detail": "Please complete verification to access this feature.",
+        },
+    )
+
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+if FRONTEND_URL and FRONTEND_URL not in allowed_origins:
+    allowed_origins.append(FRONTEND_URL)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=allowed_origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -81,6 +100,15 @@ def on_startup():
     try:
         from sqlalchemy import inspect
         inspector = inspect(engine)
+        if inspector.has_table('users'):
+            user_cols = [c['name'] for c in inspector.get_columns('users')]
+            with engine.connect() as conn:
+                if 'reset_token' not in user_cols:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN reset_token VARCHAR(500)"))
+                if 'reset_token_expires_at' not in user_cols:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN reset_token_expires_at TIMESTAMP WITH TIME ZONE"))
+                conn.commit()
+
         if inspector.has_table('lawyer_profiles'):
             cols = [c['name'] for c in inspector.get_columns('lawyer_profiles')]
             with engine.connect() as conn:

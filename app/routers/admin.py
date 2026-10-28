@@ -623,7 +623,7 @@ def get_audit_logs(
 @router.get("/overview", response_model=AdminOverviewResponse)
 @router.get("/analytics", response_model=AdminOverviewResponse)
 def get_admin_overview(
-    current_user: User = Depends(require_role("admin", "moderator")),
+    current_user: User = Depends(require_scope("analytics:view")),
     db: Session = Depends(get_db),
 ):
     """
@@ -1347,6 +1347,21 @@ def _get_llm_credential_status(db: Session = None) -> dict:
     return cred_map
 
 
+DEFAULT_BD_LEGAL_SYSTEM_PROMPT = (
+    "You are BD Legal AI, a Bangladesh legal assistant specializing in Bangladesh law "
+    "(Penal Code 1860, Evidence Act 1872, CPC 1908, CrPC 1898, Family Courts Ordinance 1985, "
+    "Land laws, Company Act 1994). Always:\n"
+    "- Cite specific sections/acts when advising\n"
+    "- Structure responses: Legal Analysis → Key Sections → Practical Steps\n"
+    "- State confidence level (High/Medium/Low) based on clarity of facts\n"
+    "- If facts are ambiguous, ask clarifying questions before advising\n"
+    "- Never give definitive legal advice; always recommend consulting a lawyer\n"
+    "- Use plain English with Bengali legal terms in parentheses when helpful\n"
+    "- Decline non-legal questions politely"
+)
+DEFAULT_DISCLAIMER = "This information is for educational purposes and not a substitute for professional legal advice."
+
+
 def _get_or_create_active_llm_config(db: Session) -> LlmConfig:
     active_config = (
         db.query(LlmConfig)
@@ -1360,8 +1375,8 @@ def _get_or_create_active_llm_config(db: Session) -> LlmConfig:
             model_name="gemini-2.5-flash",
             temperature=0.7,
             max_tokens=2048,
-            system_prompt="You are an AI legal assistant specialized in the laws of Bangladesh.",
-            disclaimer="This information is for educational purposes and not a substitute for professional legal advice.",
+            system_prompt=DEFAULT_BD_LEGAL_SYSTEM_PROMPT,
+            disclaimer=DEFAULT_DISCLAIMER,
             is_active=True,
         )
         db.add(active_config)
@@ -1568,8 +1583,8 @@ def reset_admin_llm_config(
         model_name="gemini-2.5-flash",
         temperature=0.7,
         max_tokens=2048,
-        system_prompt="You are an AI legal assistant specialized in the laws of Bangladesh.",
-        disclaimer="This information is for educational purposes and not a substitute for professional legal advice.",
+        system_prompt=DEFAULT_BD_LEGAL_SYSTEM_PROMPT,
+        disclaimer=DEFAULT_DISCLAIMER,
         is_active=True,
     )
     db.add(default_config)

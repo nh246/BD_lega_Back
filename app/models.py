@@ -37,7 +37,17 @@ class User(Base):
     # status: active | blocked | restricted
     status = Column(String(50), default="active", nullable=False)
     scopes = Column(JSON, nullable=True)
+    reset_token = Column(String(500), nullable=True)
+    reset_token_expires_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    @property
+    def hashed_password(self):
+        return self.password_hash
+
+    @hashed_password.setter
+    def hashed_password(self, value):
+        self.password_hash = value
 
     # Relationships
     lawyer_profile = relationship("LawyerProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
@@ -57,6 +67,8 @@ class LawyerProfile(Base):
     district = Column(String(100), nullable=True)
     specialization = Column(String(255), nullable=True)
     phone = Column(String(50), nullable=True)
+    bio = Column(Text, nullable=True)
+    verification_checklist = Column(JSON, nullable=True, default=dict)
     # verification_status: pending | approved | rejected
     verification_status = Column(String(50), default="pending", nullable=False)
     verification_paid = Column(Boolean, default=False, nullable=False)
@@ -124,7 +136,7 @@ class Booking(Base):
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id = Column(Uuid, ForeignKey("users.id"), nullable=False)
     lawyer_id = Column(Uuid, ForeignKey("lawyer_profiles.id"), nullable=False)
-    schedule_id = Column(Uuid, ForeignKey("schedules.id"), unique=True, nullable=False)
+    schedule_id = Column(Uuid, ForeignKey("schedules.id", ondelete="SET NULL"), unique=True, nullable=True)
     # status: pending | awaiting_payment | payment_submitted | confirmed | completion_requested | completed | cancelled | expired | refund_due
     status = Column(String(50), default="pending", nullable=False)
     trx_id = Column(String(255), nullable=True)

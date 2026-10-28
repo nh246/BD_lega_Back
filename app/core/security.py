@@ -55,3 +55,27 @@ def decode_access_token(token: str) -> Dict[str, Any]:
         return payload
     except jwt.PyJWTError as e:
         raise ValueError(f"Invalid or expired token: {e}") from e
+
+
+def create_password_reset_token(email: str, expires_delta: Optional[timedelta] = None) -> str:
+    """Create a signed JWT password reset token expiring in 30 minutes."""
+    now = datetime.now(timezone.utc)
+    expire = now + (expires_delta if expires_delta else timedelta(minutes=30))
+    payload = {
+        "sub": email,
+        "type": "password_reset",
+        "iat": now,
+        "exp": expire,
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=ALGORITHM)
+
+
+def decode_password_reset_token(token: str) -> Dict[str, Any]:
+    """Decode and validate a JWT password reset token. Raises ValueError on failure."""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
+        if payload.get("type") != "password_reset":
+            raise ValueError("Token is not a password reset token")
+        return payload
+    except jwt.PyJWTError as e:
+        raise ValueError(f"Invalid or expired token: {e}") from e

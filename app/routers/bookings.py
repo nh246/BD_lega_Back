@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_role, check_account_restriction
+from app.core.deps import get_current_user, require_role, check_account_restriction, require_verified_lawyer
 from app.models import Booking, LawyerProfile, Schedule, User, Subscription, Plan, AuditLog
 from app.schemas import BookingCreate, BookingPaymentSubmit, BookingResponse, BookingUpdate
 from app.audit import log_audit
@@ -244,8 +244,9 @@ def get_my_bookings(
 
 @router.get("/lawyer/bookings", response_model=List[LawyerBookingResponse])
 @router.get("/lawyer/requests", response_model=List[LawyerBookingResponse])
+@router.get("/lawyer/consultations", response_model=List[LawyerBookingResponse])
 def get_lawyer_bookings(
-    current_user: User = Depends(require_role("lawyer")),
+    current_user: User = Depends(require_verified_lawyer),
     db: Session = Depends(get_db),
 ):
     """

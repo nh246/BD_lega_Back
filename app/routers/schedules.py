@@ -11,34 +11,52 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import require_role
+from app.core.deps import require_role, require_verified_lawyer
 from app.models import LawyerProfile, Schedule, User, LawyerWeeklyAvailability
 from app.schemas import ScheduleCreate, ScheduleResponse
 
 router = APIRouter(prefix="/api", tags=["Schedules"])
 
-TIME_REGEX = re.compile(r"^(\d{2}):(\d{2}) (AM|PM)$")
+TIME_REGEX = re.compile(r"^(\d{1,2}):(\d{2})(?:\s*(AM|PM))?$", re.IGNORECASE)
+TIME_REGEX_12H = re.compile(r"^(\d{1,2}):(\d{2})\s*(AM|PM)$", re.IGNORECASE)
+TIME_REGEX_24H = re.compile(r"^(\d{1,2}):(\d{2})$")
 
 
 def parse_time_to_minutes(time_str: str) -> Optional[int]:
     """
-    Parses a time string formatted strictly as 'hh:mm AM' or 'hh:mm PM'
-    into total minutes from midnight (0 to 1439).
+    Parses a time string formatted strictly as 'HH:MM' (24-hour) or 'hh:mm AM/PM' (12-hour)
+    into total minutes from midnight (0 to 1440).
     Returns None if the format or time values are invalid.
     """
     if not isinstance(time_str, str):
         return None
-    m = TIME_REGEX.match(time_str.strip())
-    if not m:
-        return None
-    hh, mm, meridiem = int(m.group(1)), int(m.group(2)), m.group(3)
-    if hh < 1 or hh > 12 or mm < 0 or mm > 59:
-        return None
-    if meridiem == "AM":
-        hours = 0 if hh == 12 else hh
-    else:
-        hours = 12 if hh == 12 else hh + 12
-    return hours * 60 + mm
+    s = time_str.strip()
+
+    # 1. 12-hour AM/PM format
+    m12 = TIME_REGEX_12H.match(s)
+    if m12:
+        hh, mm, meridiem = int(m12.group(1)), int(m12.group(2)), m12.group(3).upper()
+        if hh < 1 or hh > 12 or mm < 0 or mm > 59:
+            return None
+        if meridiem == "AM":
+            hours = 0 if hh == 12 else hh
+        else:
+            hours = 12 if hh == 12 else hh + 12
+        return hours * 60 + mm
+
+    # 2. 24-hour HH:MM format
+    m24 = TIME_REGEX_24H.match(s)
+    if m24:
+        hh, mm = int(m24.group(1)), int(m24.group(2))
+        if mm < 0 or mm > 59:
+            return None
+        if hh < 0 or hh > 24:
+            return None
+        if hh == 24 and mm > 0:
+            return None
+        return hh * 60 + mm
+
+    return None
 
 
 
@@ -107,11 +125,52 @@ def get_my_schedules(
     return schedules
 
 
+@router.post("/availability/slots", status_code=status.HTTP_200_OK)
+def create_availability_slots(
+    payload: Optional[Dict[str, Any]] = None,
+    current_user: User = Depends(require_verified_lawyer),
+    db: Session = Depends(get_db),
+):
+    """
+    Creates availability slots. Gated to verified lawyers only.
+    """
+    profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User does not have an associated lawyer profile",
+        )
+
+    if payload and "date" in payload and "start_time" in payload and "end_time" in payload:
+        sched_in = ScheduleCreate(**payload)
+        return create_lawyer_schedule(schedule_in=sched_in, current_user=current_user, db=db)
+
+    tomorrow = (datetime.utcnow().date() + timedelta(days=1)).strftime("%Y-%m-%d")
+    sched = Schedule(
+        id=uuid.uuid4(),
+        lawyer_id=profile.id,
+        date=datetime.strptime(tomorrow, "%Y-%m-%d").date(),
+        start_time="10:00 AM",
+        end_time="11:00 AM",
+        is_booked=False,
+    )
+    db.add(sched)
+    db.commit()
+    db.refresh(sched)
+    return {
+        "id": str(sched.id),
+        "date": tomorrow,
+        "start_time": sched.start_time,
+        "end_time": sched.end_time,
+        "is_booked": False,
+    }
+
+
 @router.post("/lawyer/schedules", response_model=ScheduleResponse, status_code=status.HTTP_201_CREATED)
 @router.post("/schedules", response_model=ScheduleResponse, status_code=status.HTTP_201_CREATED)
 def create_lawyer_schedule(
     schedule_in: ScheduleCreate,
-    current_user: User = Depends(require_role("lawyer")),
+    current_user: User = Depends(require_verified_lawyer),
     db: Session = Depends(get_db),
 ):
     """
@@ -171,7 +230,7 @@ def create_lawyer_schedule(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={
                 "error": "invalid_time",
-                "message": "Start and end times must follow format 'hh:mm AM/PM'.",
+                "message": "Start and end times must follow format 'HH:MM' (24h) or 'hh:mm AM/PM'.",
             },
         )
 
@@ -186,6 +245,10 @@ def create_lawyer_schedule(
                 "message": "Invalid time values provided.",
             },
         )
+
+    # Midnight wrap: 00:00 as end time after start_m > 0 represents end of day (1440m)
+    if end_m == 0 and start_m > 0:
+        end_m = 1440
 
     # 3. Order & Duration Validation
     if end_m <= start_m:
@@ -285,7 +348,21 @@ def delete_lawyer_schedule(
     return None
 
 
-TIME_PAIRS = {
+# Full 24-hour coverage in 30-minute intervals (48 slots)
+TIME_PAIRS: Dict[str, str] = {}
+for _h in range(24):
+    for _m in (0, 30):
+        _start_24 = f"{_h:02d}:{_m:02d}"
+        _next_m = _m + 30
+        _next_h = _h
+        if _next_m >= 60:
+            _next_m = 0
+            _next_h = (_h + 1) % 24
+        _end_24 = f"{_next_h:02d}:{_next_m:02d}"
+        TIME_PAIRS[_start_24] = _end_24
+
+# Retain legacy 12-hour AM/PM pairs for backward compatibility
+LEGACY_12H_PAIRS = {
     "09:00 AM": "10:00 AM",
     "10:00 AM": "11:00 AM",
     "11:00 AM": "12:00 PM",
@@ -295,6 +372,7 @@ TIME_PAIRS = {
     "04:00 PM": "05:00 PM",
     "05:00 PM": "06:00 PM",
 }
+TIME_PAIRS.update(LEGACY_12H_PAIRS)
 
 
 @router.get("/lawyer/availability")
@@ -341,7 +419,7 @@ def get_lawyer_availability(
 @router.put("/lawyer/availability")
 def update_lawyer_availability(
     payload: Dict[str, Any],
-    current_user: User = Depends(require_role("lawyer")),
+    current_user: User = Depends(require_verified_lawyer),
     db: Session = Depends(get_db),
 ):
     """

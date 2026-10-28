@@ -112,9 +112,37 @@ def _generate_gemini(
     try:
         gemini_model = genai.GenerativeModel(**model_kwargs)
         if images:
+            import base64
             user_msgs = [m.get("content", "") for m in messages if m.get("role") == "user"]
             prompt_text = user_msgs[-1] if user_msgs else "Please analyze this image."
-            image_parts = [{"mime_type": img.get("mime_type"), "data": img.get("data")} for img in images]
+            image_parts = []
+            for img in images:
+                if not isinstance(img, dict):
+                    continue
+                if "inline_data" in img and isinstance(img["inline_data"], dict):
+                    mime = img["inline_data"].get("mime_type") or "image/jpeg"
+                    data_val = img["inline_data"].get("data")
+                else:
+                    mime = img.get("mime_type") or "image/jpeg"
+                    data_val = img.get("data")
+
+                if isinstance(data_val, str):
+                    try:
+                        data_bytes = base64.b64decode(data_val)
+                    except Exception:
+                        data_bytes = data_val.encode("utf-8")
+                elif isinstance(data_val, (bytes, bytearray)):
+                    data_bytes = bytes(data_val)
+                else:
+                    data_bytes = b""
+
+                image_parts.append({
+                    "inline_data": {
+                        "mime_type": mime,
+                        "data": data_bytes,
+                    }
+                })
+
             content = [prompt_text] + image_parts
             response = gemini_model.generate_content(
                 content,
@@ -158,12 +186,19 @@ def _generate_openai(
         text_content = last_msg.get("content", "")
         parts = [{"type": "text", "text": text_content}]
         for img in images:
-            b64 = img.get("data")
+            if not isinstance(img, dict):
+                continue
+            if "inline_data" in img and isinstance(img["inline_data"], dict):
+                mime = img["inline_data"].get("mime_type") or "image/jpeg"
+                b64 = img["inline_data"].get("data")
+            else:
+                mime = img.get("mime_type") or "image/jpeg"
+                b64 = img.get("data")
             if isinstance(b64, bytes):
                 b64 = base64.b64encode(b64).decode("utf-8")
             parts.append({
                 "type": "image_url",
-                "image_url": {"url": f"data:{img.get('mime_type', 'image/jpeg')};base64,{b64}"}
+                "image_url": {"url": f"data:{mime};base64,{b64}"}
             })
         last_msg["content"] = parts
 
@@ -211,14 +246,21 @@ def _generate_anthropic(
         text_content = last_msg.get("content", "")
         parts = []
         for img in images:
-            b64 = img.get("data")
+            if not isinstance(img, dict):
+                continue
+            if "inline_data" in img and isinstance(img["inline_data"], dict):
+                mime = img["inline_data"].get("mime_type") or "image/jpeg"
+                b64 = img["inline_data"].get("data")
+            else:
+                mime = img.get("mime_type") or "image/jpeg"
+                b64 = img.get("data")
             if isinstance(b64, bytes):
                 b64 = base64.b64encode(b64).decode("utf-8")
             parts.append({
                 "type": "image",
                 "source": {
                     "type": "base64",
-                    "media_type": img.get("mime_type", "image/jpeg"),
+                    "media_type": mime,
                     "data": b64,
                 }
             })
@@ -273,19 +315,32 @@ def generate_response(
         )
         if is_bangla:
             reply = (
-                f"এটি বাংলাদেশ আইনি নির্দেশিকা এআই (মক ইঞ্জিন) থেকে একটি আইনি পর্যালোচনা।\n"
-                f"কনফিগার করা মডেল: {model or 'mock-model'}\n"
+                f"আইনি পর্যালোচনা (মক ইঞ্জিন - {model or 'mock-model'}):\n\n"
                 f"প্রাপ্ত প্রশ্ন: {user_msg}\n\n"
-                "আইনি বিশ্লেষণ: বাংলাদেশে দেওয়ানি মামলা ও বিরোধসমূহ দেওয়ানি কার্যবিধি ১৯০৮ (CPC) এবং তামাদি আইন ১৯০৮ অনুযায়ী পরিচালিত হয়। "
-                "নির্দিষ্ট প্রতিকারের জন্য তামাদি আইনের সময়সীমা কঠোরভাবে প্রযোজ্য। যেকোনো আইনি কার্যক্রমের জন্য একজন বিজ্ঞ রেজিস্ট্রার্ড আইনজীবীর পরামর্শ নিন।"
+                "**Legal Analysis (আইনি বিশ্লেষণ)**:\n"
+                "বাংলাদেশে দেওয়ানি ও ফৌজদারি প্রতিকার দেওয়ানি কার্যবিধি ১৯০৮ (CPC), দণ্ডবিধি ১৮৬০ (Penal Code), এবং তামাদি আইন ১৯০৮ (Limitation Act) অনুযায়ী পরিচালিত হয়।\n\n"
+                "**Key Sections (প্রধান ধারা ও আইন)**:\n"
+                "- দেওয়ানি কার্যবিধি ১৯০৮ (CPC 1908) - ধারা ৯ (দেওয়ানি আদালতের এখতিয়ার)\n"
+                "- তামাদি আইন ১৯০৮ (Limitation Act 1908) - ধারা ৩ ও প্রথম তফসিল\n\n"
+                "**Practical Steps (ব্যবহারিক পদক্ষেপ)**:\n"
+                "১. প্রয়োজনীয় সকল দলিল ও প্রমাণাদি সংরক্ষণ করুন।\n"
+                "২. আরজি (Plaint) প্রস্তুত করার জন্য একজন বিজ্ঞ তালিকাভুক্ত আইনজীবীর পরামর্শ গ্রহণ করুন।\n\n"
+                "Confidence: High (স্পষ্ট আইনি বিধানের ভিত্তিতে)।"
             )
         else:
             reply = (
-                f"This is a response from BD Legal Guide AI (mock provider).\n"
-                f"Configured Model: {model or 'mock-model'}\n"
-                f"Prompt received: {user_msg}\n\n"
-                "Legal Analysis: In Bangladesh, civil suits are governed by the Code of Civil Procedure 1908 and the Limitation Act 1908. "
-                "Please consult a registered advocate for formal litigation advice."
+                f"Response from BD Legal AI (Mock Engine - {model or 'mock-model'}):\n\n"
+                f"Query: {user_msg}\n\n"
+                "### Legal Analysis\n"
+                "In Bangladesh, legal remedies are governed by codified statutory frameworks including the Code of Civil Procedure 1908 (CPC), the Penal Code 1860, and the Limitation Act 1908. Any legal claim or lawsuit must be instituted within the prescribed statutory period before a court of competent jurisdiction.\n\n"
+                "### Key Sections\n"
+                "- **Code of Civil Procedure 1908 (CPC 1908), Section 9**: Jurisdiction of civil courts to try all civil suits unless barred.\n"
+                "- **Limitation Act 1908, Section 3 & Schedule I (Articles 142 & 144)**: Prescribed limitation periods (e.g. 12 years for recovery of possession of immovable property).\n\n"
+                "### Practical Steps\n"
+                "1. Gather and verify all title documents, deeds (*Dalil*), and records of rights (*Khatian*).\n"
+                "2. Draft a formal plaint (*Arzi*) detailing the cause of action and prayers for relief.\n"
+                "3. Consult a licensed advocate of the Bangladesh Bar Council for formal filing.\n\n"
+                "Confidence: High based on established statutory provisions."
             )
         if images:
             reply += f" [{len(images)} image attachment(s) received.]"

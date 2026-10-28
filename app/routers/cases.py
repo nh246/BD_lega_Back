@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
 
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_role, check_account_restriction
+from app.core.deps import get_current_user, require_role, check_account_restriction, require_verified_lawyer
 from app.core.plans import get_user_plan, is_pro_plan
 from app.models import (
     Booking,
@@ -352,7 +352,7 @@ def get_case_details(
 def submit_case_bid(
     case_id: str,
     payload: CaseBidCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_verified_lawyer),
     db: Session = Depends(get_db),
 ):
     """

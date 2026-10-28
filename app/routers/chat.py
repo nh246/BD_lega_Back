@@ -173,14 +173,25 @@ def send_chat_message(
         model = config.model_name
         temp = config.temperature
         max_tokens = config.max_tokens
-        system_prompt = config.system_prompt or "You are an AI legal assistant specialized in the laws of Bangladesh."
+        system_prompt = config.system_prompt or "You are BD Legal AI, a Bangladesh legal assistant specializing in Bangladesh law (Penal Code 1860, Evidence Act 1872, CPC 1908, CrPC 1898, Family Courts Ordinance 1985, Land laws, Company Act 1994)."
         disclaimer = config.disclaimer or "This information is for educational purposes and not a substitute for professional legal advice."
     else:
         provider = "gemini"
         model = "gemini-2.5-flash"
         temp = 0.7
         max_tokens = 2048
-        system_prompt = "You are an AI legal assistant specialized in the laws of Bangladesh."
+        system_prompt = (
+            "You are BD Legal AI, a Bangladesh legal assistant specializing in Bangladesh law "
+            "(Penal Code 1860, Evidence Act 1872, CPC 1908, CrPC 1898, Family Courts Ordinance 1985, "
+            "Land laws, Company Act 1994). Always:\n"
+            "- Cite specific sections/acts when advising\n"
+            "- Structure responses: Legal Analysis → Key Sections → Practical Steps\n"
+            "- State confidence level (High/Medium/Low) based on clarity of facts\n"
+            "- If facts are ambiguous, ask clarifying questions before advising\n"
+            "- Never give definitive legal advice; always recommend consulting a lawyer\n"
+            "- Use plain English with Bengali legal terms in parentheses when helpful\n"
+            "- Decline non-legal questions politely"
+        )
         disclaimer = "This information is for educational purposes and not a substitute for professional legal advice."
 
     # Check vision support for image attachments

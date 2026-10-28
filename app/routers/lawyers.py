@@ -231,6 +231,10 @@ def _enrich_lawyers_bulk(
                 meeting_link=getattr(lawyer, "meeting_link", None),
                 payment_methods=getattr(lawyer, "payment_methods", []) or [],
                 payment_instructions=getattr(lawyer, "payment_instructions", None),
+                verification_checklist=getattr(lawyer, "verification_checklist", None) or {"nid": None, "bar_council_cert": None, "practicing_license": None},
+                verification_note=getattr(lawyer, "verification_note", None),
+                bio=getattr(lawyer, "bio", None),
+                description=getattr(lawyer, "bio", None),
             )
         )
     return results
@@ -411,6 +415,21 @@ def update_my_lawyer_profile(
 
     if update_data.name is not None:
         profile.name = update_data.name.strip()
+        current_user.full_name = update_data.name.strip()
+    elif update_data.full_name is not None:
+        profile.name = update_data.full_name.strip()
+        current_user.full_name = update_data.full_name.strip()
+
+    if update_data.bio is not None:
+        profile.bio = update_data.bio.strip()
+    elif update_data.description is not None:
+        profile.bio = update_data.description.strip()
+
+    if update_data.bar_council_id is not None:
+        profile.bar_council_id = update_data.bar_council_id.strip()
+    elif update_data.bar_council_no is not None:
+        profile.bar_council_id = update_data.bar_council_no.strip()
+
     if update_data.district is not None:
         profile.district = update_data.district.strip()
     if update_data.specialization is not None:
@@ -423,6 +442,81 @@ def update_my_lawyer_profile(
         profile.years_exp = update_data.years_exp
     if update_data.languages is not None:
         profile.languages = update_data.languages.strip()
+    if update_data.verification_checklist is not None:
+        profile.verification_checklist = update_data.verification_checklist
+    if update_data.payment_methods is not None:
+        profile.payment_methods = update_data.payment_methods
+    if update_data.payment_instructions is not None:
+        profile.payment_instructions = update_data.payment_instructions.strip() if update_data.payment_instructions else None
+    if update_data.meeting_provider is not None:
+        profile.meeting_provider = update_data.meeting_provider.strip() if update_data.meeting_provider else None
+    if update_data.meeting_link is not None:
+        profile.meeting_link = update_data.meeting_link.strip() if update_data.meeting_link else None
+
+    db.commit()
+    db.refresh(profile)
+    return _enrich_lawyer(profile, db, viewer=current_user, allow_phone=True)
+
+
+@router.post("/lawyer/verification/submit", response_model=LawyerResponse)
+@router.post("/lawyer/verification-submit", response_model=LawyerResponse)
+def submit_lawyer_verification(
+    current_user: User = Depends(require_role("lawyer")),
+    db: Session = Depends(get_db),
+):
+    """
+    Submits lawyer verification documents for admin review.
+    Requires all 3 slots (nid, bar_council_cert, practicing_license) to be uploaded.
+    Sets verification_status='pending' and triggers admin notification 'lawyer_verification_submitted'.
+    """
+    profile = db.query(LawyerProfile).filter(LawyerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Lawyer profile not found",
+        )
+
+    checklist = dict(profile.verification_checklist or {})
+    nid = checklist.get("nid")
+    bar_cert = checklist.get("bar_council_cert")
+    license_doc = checklist.get("practicing_license")
+
+    # If any slot is missing, check if user has verification ProfileAsset rows to auto-link
+    if not nid or not bar_cert or not license_doc:
+        verif_assets = (
+            db.query(ProfileAsset)
+            .filter(
+                ProfileAsset.owner_user_id == current_user.id,
+                ProfileAsset.kind == "verification",
+            )
+            .order_by(ProfileAsset.created_at.asc())
+            .all()
+        )
+        if len(verif_assets) >= 3:
+            checklist["nid"] = nid or str(verif_assets[0].id)
+            checklist["bar_council_cert"] = bar_cert or str(verif_assets[1].id)
+            checklist["practicing_license"] = license_doc or str(verif_assets[2].id)
+            profile.verification_checklist = checklist
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="All 3 verification documents (National ID, Bar Council Certificate, Practicing License) must be uploaded before submitting.",
+            )
+
+    profile.verification_status = "pending"
+    # Trigger admin notification
+    try:
+        from app.services.notifications import trigger_admin_notification
+        lawyer_name = profile.name or current_user.full_name or "Advocate"
+        trigger_admin_notification(
+            db=db,
+            type="lawyer_verification_submitted",
+            title="Lawyer Verification Submitted",
+            message=f"Lawyer {lawyer_name} has submitted all 3 verification documents for review.",
+            link="/admin/lawyers",
+        )
+    except Exception:
+        pass
 
     db.commit()
     db.refresh(profile)

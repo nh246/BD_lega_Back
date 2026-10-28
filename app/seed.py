@@ -511,30 +511,36 @@ def seed_database():
         # ---------------------------------------------------------
         # 8. Seed 1 Active LLM Config
         # ---------------------------------------------------------
-        existing_llm = db.query(LlmConfig).filter(LlmConfig.provider == "gemini", LlmConfig.model_name == "gemini-1.5-flash").first()
+        existing_llm = db.query(LlmConfig).filter(LlmConfig.provider == "gemini", LlmConfig.model_name == "gemini-2.5-flash").first()
         if not existing_llm:
             llm_config = LlmConfig(
                 id=uuid.uuid4(),
                 provider="gemini",
-                model_name="gemini-1.5-flash",
-                temperature=0.3,
+                model_name="gemini-2.5-flash",
+                temperature=0.7,
                 max_tokens=2048,
                 system_prompt=(
-                    "You are BD Legal Guide AI, an authoritative, helpful legal information assistant "
-                    "specializing in Bangladesh law (Penal Code 1860, Code of Criminal Procedure 1898, "
-                    "Civil Law, and Special Statutory Acts)."
+                    "You are BD Legal AI, a Bangladesh legal assistant specializing in "
+                    "Bangladesh law (Penal Code 1860, Evidence Act 1872, CPC 1908, CrPC 1898, "
+                    "Family Courts Ordinance 1985, Land laws, Company Act 1994). Always:\n"
+                    "- Cite specific sections/acts when advising\n"
+                    "- Structure responses: Legal Analysis → Key Sections → Practical Steps\n"
+                    "- State confidence level (High/Medium/Low) based on clarity of facts\n"
+                    "- If facts are ambiguous, ask clarifying questions before advising\n"
+                    "- Never give definitive legal advice; always recommend consulting a lawyer\n"
+                    "- Use plain English with Bengali legal terms in parentheses when helpful\n"
+                    "- Decline non-legal questions politely"
                 ),
                 disclaimer=(
-                    "This is general legal information and does not constitute formal attorney-client legal "
-                    "representation. For specific legal counsel, please book a consultation with a verified advocate."
+                    "This information is for educational purposes and not a substitute for professional legal advice."
                 ),
                 is_active=True,
                 created_at=datetime.utcnow(),
             )
             db.add(llm_config)
-            print(" [+] LLM Config created: gemini-1.5-flash (Active)")
+            print(" [+] LLM Config created: gemini-2.5-flash (Active)")
         else:
-            print(" [.] LLM Config exists: gemini-1.5-flash")
+            print(" [.] LLM Config exists: gemini-2.5-flash")
 
         # ---------------------------------------------------------
         # 9. Seed 2 Payments (Status: paid)

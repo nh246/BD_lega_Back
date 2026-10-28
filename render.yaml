@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: bd-legal-guide-backend
+    name: legal-bridge-backend
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
@@ -9,8 +9,8 @@ services:
       - key: PYTHON_VERSION
         value: 3.10.12
       - key: GOOGLE_API_KEY
-        sync: false # You will enter this securely in the Render dashboard
-      - key: SECRET_KEY
         sync: false
+      - key: JWT_SECRET
+        generateValue: true
       - key: FRONTEND_URL
         sync: false

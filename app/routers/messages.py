@@ -14,7 +14,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import require_role, check_account_restriction
+from app.core.deps import require_role, check_account_restriction, require_verified_lawyer, get_current_user
 from app.core.plans import get_user_plan, is_pro_plan
 from app.models import DirectMessage, LawyerProfile, User, Booking, ProfileAsset
 from app.services.notifications import trigger_notification
@@ -86,15 +86,21 @@ def _serialize_message(m: DirectMessage) -> dict:
         if hasattr(m.created_at, "isoformat")
         else str(m.created_at)
     )
+    sender_name = None
+    if hasattr(m, "sender") and m.sender:
+        sender_name = getattr(m.sender, "full_name", None)
     return {
         "id": str(m.id),
-        "sender_user_id": str(m.sender_user_id),
-        "lawyer_profile_id": str(m.lawyer_profile_id),
+        "sender_user_id": str(m.sender_user_id) if m.sender_user_id else None,
+        "sender_name": sender_name or "Unavailable user",
+        "lawyer_profile_id": str(m.lawyer_profile_id) if m.lawyer_profile_id else None,
         "recipient_user_id": str(m.recipient_user_id) if m.recipient_user_id else None,
-        "content": m.content,
+        "content": m.content or "",
         "attachments": [str(a) for a in (m.attachments or [])],
         "is_read": bool(m.is_read),
         "created_at": created_at_val,
+        "case_id": str(m.case_id) if getattr(m, "case_id", None) else None,
+        "bid_id": str(m.bid_id) if getattr(m, "bid_id", None) else None,
     }
 
 
@@ -150,8 +156,7 @@ def get_lawyer_inbox(
 
         cid_str = str(citizen_id)
         if cid_str not in threads:
-            citizen = db.query(User).filter(User.id == citizen_id).first()
-            full_name = citizen.full_name if citizen else "Citizen"
+            full_name = (citizen.full_name if citizen else None) or "Unavailable user"
             created_at_str = (
                 msg.created_at.isoformat()
                 if hasattr(msg.created_at, "isoformat")
@@ -233,7 +238,7 @@ def get_lawyer_thread(
 def reply_to_citizen(
     user_id: str,
     payload: MessageCreate,
-    current_user: User = Depends(require_role("lawyer")),
+    current_user: User = Depends(require_verified_lawyer),
     db: Session = Depends(get_db),
 ):
     """
@@ -347,17 +352,20 @@ def reply_to_citizen(
 def send_message_to_lawyer(
     lawyer_id: str,
     payload: MessageCreate,
-    current_user: User = Depends(require_role("user")),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
-    Citizen sends a direct message to an approved lawyer:
-    - Pro users can message any verified lawyer without booking.
-    - Free users can only message lawyers with a confirmed booking.
-    - If consultation is completed, thread is read-only -> 403 {"error":"booking_completed", ...}.
-    - If no booking exists: return 403 {"error":"no_booking", ...}.
-    - Supports up to 4 attachments.
+    Citizen sends a direct message to an approved lawyer (or lawyer sending message).
+    If a lawyer attempts to send messages, they must be approved.
     """
+    if current_user.role == "lawyer":
+        require_verified_lawyer(current_user, db)
+    elif current_user.role not in ("user", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permissions",
+        )
     restriction = check_account_restriction(current_user)
     if restriction:
         return restriction
