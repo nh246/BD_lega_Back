@@ -29,7 +29,7 @@ from app.routers.reviews import router as reviews_router
 from app.routers.notifications import router as notifications_router, compat_router as notifications_compat_router
 from app.routers.cases import router as cases_router
 
-app = FastAPI(title="BD Legal Guide AI API")
+app = FastAPI(title="Legal Bridge API")
 
 @app.exception_handler(UnverifiedLawyerException)
 async def unverified_lawyer_exception_handler(request: Request, exc: UnverifiedLawyerException):
@@ -224,6 +224,16 @@ def on_startup():
         pass
 
 
+@app.get("/")
+def root():
+    return {
+        "status": "ok",
+        "service": "Legal Bridge API",
+        "version": "1.0.0",
+        "docs": "/docs",
+    }
+
+
 @app.get("/health")
 def health_check(db: Session = Depends(get_db)):
     db_status = "connected"
@@ -234,6 +244,6 @@ def health_check(db: Session = Depends(get_db)):
 
     return {
         "status": "ok",
-        "service": "BD Legal Guide AI API",
+        "service": "Legal Bridge API",
         "db": db_status,
     }

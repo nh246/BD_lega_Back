@@ -3,6 +3,9 @@ uvicorn[standard]
 sqlalchemy
 psycopg2-binary
 bcrypt
+PyJWT
+email-validator
+requests
 python-dotenv
 pydantic
 httpx
