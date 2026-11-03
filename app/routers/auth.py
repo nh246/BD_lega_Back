@@ -40,10 +40,13 @@ router = APIRouter(prefix="/api/auth", tags=["Auth"])
 
 def _make_user_response(db: Session, user: User) -> UserResponse:
     user_plan = get_user_plan(db, user)
+    display_name = user.full_name
+    if user.role == "lawyer" and user.lawyer_profile and user.lawyer_profile.name:
+        display_name = user.lawyer_profile.name
     return UserResponse(
         id=str(user.id),
         email=user.email,
-        full_name=user.full_name,
+        full_name=display_name,
         role=user.role,
         status=user.status,
         scopes=user.scopes or [],
