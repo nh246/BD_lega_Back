@@ -66,10 +66,10 @@ async def upload_document(
         )
 
     content_bytes = await file.read()
-    if len(content_bytes) > 2 * 1024 * 1024:
+    if len(content_bytes) > 5 * 1024 * 1024:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="File size exceeds maximum limit of 2 MB.",
+            detail="File size exceeds maximum limit of 5 MB.",
         )
 
     if ext in IMAGE_MIME_TYPES:
@@ -85,6 +85,16 @@ async def upload_document(
 
         if ext in ["txt", "md"]:
             extracted_text = content_bytes.decode("utf-8", errors="ignore").strip()
+            if len(extracted_text) < 50:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={
+                        "error": "no_text",
+                        "message": "Document must contain at least 50 characters of text.",
+                    },
+                )
+            extracted_text = extracted_text[:200000]
+            char_count = len(extracted_text)
         elif ext == "pdf":
             try:
                 reader = pypdf.PdfReader(io.BytesIO(content_bytes))
@@ -100,17 +110,41 @@ async def upload_document(
                     detail=f"Failed to extract text from PDF: {str(e)}",
                 )
 
-        if len(extracted_text) < 50:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={
-                    "error": "no_text",
-                    "message": "No extractable text found. Scanned or image-only PDFs are not supported.",
-                },
-            )
+            # If digital text extraction didn't find enough text, check if the PDF contains scanned page images!
+            if len(extracted_text) < 50:
+                extracted_images = []
+                try:
+                    for page in reader.pages:
+                        for img in page.images:
+                            extracted_images.append(img)
+                except Exception:
+                    pass
 
-        extracted_text = extracted_text[:200000]
-        char_count = len(extracted_text)
+                if extracted_images:
+                    # Treat this scanned PDF as a multimodal image document for Gemini
+                    first_img = extracted_images[0]
+                    kind = "image"
+                    img_name = (getattr(first_img, "name", "") or "").lower()
+                    if img_name.endswith(".png"):
+                        mime_type = "image/png"
+                    elif img_name.endswith(".webp"):
+                        mime_type = "image/webp"
+                    else:
+                        mime_type = "image/jpeg"
+                    file_bytes = first_img.data
+                    extracted_text = f"[Scanned PDF Document: {filename}]"
+                    char_count = len(file_bytes)
+                else:
+                    return JSONResponse(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        content={
+                            "error": "no_text",
+                            "message": "No extractable text or images found. Scanned PDFs must contain legible page images, or please upload the document directly as an image (.jpg, .png).",
+                        },
+                    )
+            else:
+                extracted_text = extracted_text[:200000]
+                char_count = len(extracted_text)
 
     doc = Document(
         owner_user_id=current_user.id,
