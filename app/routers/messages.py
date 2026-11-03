@@ -156,6 +156,7 @@ def get_lawyer_inbox(
 
         cid_str = str(citizen_id)
         if cid_str not in threads:
+            citizen = db.query(User).filter(User.id == citizen_id).first()
             full_name = (citizen.full_name if citizen else None) or "Unavailable user"
             created_at_str = (
                 msg.created_at.isoformat()

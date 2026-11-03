@@ -42,6 +42,15 @@ async def unverified_lawyer_exception_handler(request: Request, exc: UnverifiedL
         },
     )
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    import traceback
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error: " + str(exc)},
+    )
+
 allowed_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
