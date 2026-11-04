@@ -283,10 +283,14 @@ def reply_to_citizen(
         .all()
     )
 
+    # Check if citizen is a Pro subscriber or admin
+    plan = get_user_plan(db, citizen)
+    is_pro = is_pro_plan(plan) or plan == "user_pro" or bool(getattr(citizen, "is_pro", False)) or citizen.role in ("admin", "moderator")
+
     has_confirmed = any(b.status == "confirmed" for b in bookings)
     has_completed = any(b.status == "completed" for b in bookings)
 
-    if not has_confirmed:
+    if not is_pro and not has_confirmed:
         if has_completed:
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -327,6 +331,7 @@ def reply_to_citizen(
     db.refresh(reply_msg)
 
     sender_name = current_user.full_name or "Advocate"
+    notif_link = "/client/bookings" if has_confirmed else f"/client/lawyers/{profile.id}"
     try:
         trigger_notification(
             db=db,
@@ -334,7 +339,7 @@ def reply_to_citizen(
             type="new_message",
             title="New Message",
             message=f"{sender_name} sent you a message.",
-            link="/client/bookings",
+            link=notif_link,
         )
     except Exception:
         pass
