@@ -450,7 +450,7 @@ def send_message_to_lawyer(
             type="new_message",
             title="New Message",
             message=f"{sender_name} sent you a message.",
-            link="/lawyer/inbox",
+            link="/lawyer?tab=inbox",
         )
     except Exception:
         pass

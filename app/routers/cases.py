@@ -560,6 +560,10 @@ def accept_case_bid(
         .first()
     )
     meeting_link_prefill = getattr(lawyer_profile, "meeting_link", None) if lawyer_profile else None
+    meeting_prov = getattr(lawyer_profile, "meeting_provider", None) if lawyer_profile else None
+    if not meeting_link_prefill or meeting_prov == "Legal Bridge Instant Video" or "jit.si" in (meeting_link_prefill or ""):
+        room_code = str(uuid.uuid4()).replace("-", "")[:12]
+        meeting_link_prefill = f"https://meet.jit.si/LegalBridge-{room_code}"
     lawyer_rate = getattr(lawyer_profile, "hourly_rate", None)
     if lawyer_rate is None:
         lawyer_rate = 0
@@ -595,7 +599,7 @@ def accept_case_bid(
                 type="case_accepted",
                 title="Case Accepted!",
                 message=f"Your bid for '{case.title}' was accepted. Check your bookings for payment details.",
-                link="/lawyer/dashboard",
+                link="/lawyer",
             )
         except Exception:
             pass
@@ -682,7 +686,7 @@ def reject_case_bid(
                 type="case_bid_rejected",
                 title="Case Bid Update",
                 message=f"Your bid for '{case.title}' was not selected.",
-                link="/lawyer/dashboard",
+                link="/lawyer?tab=case-board",
             )
         except Exception:
             pass

@@ -121,7 +121,7 @@ def create_review(
     db.commit()
     db.refresh(review)
 
-    link = "/lawyer/dashboard" if is_client else "/client/bookings"
+    link = "/lawyer" if is_client else "/client/bookings"
     try:
         trigger_notification(
             db=db,

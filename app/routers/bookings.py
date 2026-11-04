@@ -175,6 +175,11 @@ def create_booking(
 
     # Create booking
     meeting_link_prefill = getattr(lawyer_profile, "meeting_link", None) if lawyer_profile else None
+    meeting_prov = getattr(lawyer_profile, "meeting_provider", None) if lawyer_profile else None
+    if not meeting_link_prefill or meeting_prov == "Legal Bridge Instant Video" or "jit.si" in (meeting_link_prefill or ""):
+        room_code = str(uuid.uuid4()).replace("-", "")[:12]
+        meeting_link_prefill = f"https://meet.jit.si/LegalBridge-{room_code}"
+
     new_booking = Booking(
         user_id=current_user.id,
         lawyer_id=schedule.lawyer_id,
@@ -666,7 +671,7 @@ def submit_booking_payment(
                 type="payment_submitted",
                 title="Payment Proof Submitted",
                 message="Client submitted payment proof. Please verify.",
-                link="/lawyer/dashboard",
+                link="/lawyer",
             )
         except Exception:
             pass
@@ -880,8 +885,11 @@ def start_meeting(
     booking.meeting_started_at = datetime.now(timezone.utc)
     booking.meeting_ended_at = None
 
-    if not booking.meeting_link and booking.lawyer and booking.lawyer.meeting_link:
-        booking.meeting_link = booking.lawyer.meeting_link
+    if not booking.meeting_link:
+        if booking.lawyer and booking.lawyer.meeting_link and "jit.si" not in booking.lawyer.meeting_link:
+            booking.meeting_link = booking.lawyer.meeting_link
+        else:
+            booking.meeting_link = f"https://meet.jit.si/LegalBridge-{str(booking.id).replace('-', '')[:12]}"
 
     log_audit(
         db=db,
