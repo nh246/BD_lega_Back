@@ -186,6 +186,8 @@ def create_booking(
         schedule_id=schedule.id,
         status=initial_status,
         meeting_link=meeting_link_prefill,
+        fee=hourly_rate,
+        case_brief=booking_in.case_brief,
     )
     db.add(new_booking)
     db.commit()
@@ -243,6 +245,8 @@ def get_my_bookings(
         .all()
     )
     for b in bookings:
+        if b.fee is None and b.lawyer and b.lawyer.hourly_rate is not None:
+            b.fee = b.lawyer.hourly_rate
         _check_and_apply_lazy_autocomplete(b, db)
     return bookings
 
@@ -288,7 +292,9 @@ def get_lawyer_bookings(
 
     booking_dicts = []
     for booking in bookings:
-        _check_and_apply_lazy_autocomplete(booking, db)
+        if booking.fee is None and booking.lawyer and booking.lawyer.hourly_rate is not None:
+        booking.fee = booking.lawyer.hourly_rate
+    _check_and_apply_lazy_autocomplete(booking, db)
         b_dict = BookingResponse.model_validate(booking).model_dump()
         b_dict["is_pro"] = (booking.user_id in pro_user_ids) or (str(booking.user_id) in {str(u) for u in pro_user_ids})
         booking_dicts.append(b_dict)
@@ -336,6 +342,8 @@ def get_lawyer_request_detail(
             detail="You do not have permission to view this booking",
         )
 
+    if booking.fee is None and booking.lawyer and booking.lawyer.hourly_rate is not None:
+        booking.fee = booking.lawyer.hourly_rate
     _check_and_apply_lazy_autocomplete(booking, db)
 
     return booking
@@ -381,6 +389,8 @@ def get_booking_detail(
             detail="Access denied to this booking",
         )
 
+    if booking.fee is None and booking.lawyer and booking.lawyer.hourly_rate is not None:
+        booking.fee = booking.lawyer.hourly_rate
     _check_and_apply_lazy_autocomplete(booking, db)
 
     return booking
