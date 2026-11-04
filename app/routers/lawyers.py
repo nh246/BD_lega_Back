@@ -34,6 +34,18 @@ def _parse_uuid(id_str: str) -> uuid.UUID:
         )
 
 
+def _normalize_meeting_link(link: Optional[str]) -> Optional[str]:
+    """Ensures meeting links always have a protocol prefix to prevent relative route issues."""
+    if not link:
+        return None
+    trimmed = link.strip()
+    if not trimmed:
+        return None
+    if trimmed.startswith(("http://", "https://", "tel:")):
+        return trimmed
+    return f"https://{trimmed}"
+
+
 def _can_view_phone(lawyer: LawyerProfile, viewer: Optional[User], db: Session) -> bool:
     """
     Checks if viewer is permitted to see the lawyer's phone number:
@@ -451,7 +463,7 @@ def update_my_lawyer_profile(
     if update_data.meeting_provider is not None:
         profile.meeting_provider = update_data.meeting_provider.strip() if update_data.meeting_provider else None
     if update_data.meeting_link is not None:
-        profile.meeting_link = update_data.meeting_link.strip() if update_data.meeting_link else None
+        profile.meeting_link = _normalize_meeting_link(update_data.meeting_link)
 
     db.commit()
     db.refresh(profile)
@@ -621,7 +633,7 @@ def update_my_meeting_settings(
         db.add(profile)
 
     profile.meeting_provider = settings_in.meeting_provider.strip() if settings_in.meeting_provider else None
-    profile.meeting_link = settings_in.meeting_link.strip() if settings_in.meeting_link else None
+    profile.meeting_link = _normalize_meeting_link(settings_in.meeting_link)
 
     db.commit()
     db.refresh(profile)
