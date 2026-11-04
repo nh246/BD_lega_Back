@@ -293,8 +293,8 @@ def get_lawyer_bookings(
     booking_dicts = []
     for booking in bookings:
         if booking.fee is None and booking.lawyer and booking.lawyer.hourly_rate is not None:
-        booking.fee = booking.lawyer.hourly_rate
-    _check_and_apply_lazy_autocomplete(booking, db)
+            booking.fee = booking.lawyer.hourly_rate
+        _check_and_apply_lazy_autocomplete(booking, db)
         b_dict = BookingResponse.model_validate(booking).model_dump()
         b_dict["is_pro"] = (booking.user_id in pro_user_ids) or (str(booking.user_id) in {str(u) for u in pro_user_ids})
         booking_dicts.append(b_dict)
