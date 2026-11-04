@@ -7,12 +7,13 @@ import io
 from typing import Optional
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user, get_optional_current_user
+from app.core.security import decode_access_token
 from app.models import Booking, CaseBid, CasePost, DirectMessage, LawyerProfile, ProfileAsset, User
 from sqlalchemy import cast, String
 
@@ -406,7 +407,8 @@ def _stream_asset(asset: ProfileAsset) -> StreamingResponse:
         io.BytesIO(asset.file_bytes),
         media_type=asset.mime_type or "application/octet-stream",
         headers={
-            "Content-Disposition": f'inline; filename="{asset.filename}"'
+            "Content-Disposition": f'inline; filename="{asset.filename}"',
+            "Cache-Control": "public, max-age=86400",
         },
     )
 
@@ -414,24 +416,24 @@ def _stream_asset(asset: ProfileAsset) -> StreamingResponse:
 @router.get("/api/assets/{asset_id}/file")
 def get_asset_file(
     asset_id: str,
-    requester: User = Depends(get_current_user),
+    token: Optional[str] = Query(None),
+    requester: Optional[User] = Depends(get_optional_current_user),
     db: Session = Depends(get_db),
 ):
     """
     Stream asset file contents.
     Visibility permission rules (in order):
-    1. Owner of the asset -> allow
-    2. admin / moderator -> allow
-    3. Asset id present in a CasePost.attachment_asset_ids AND requester is
+    1. Avatars -> publicly viewable for all users, lawyers, and visitors (clean <img> support).
+    2. Owner of the asset -> allow
+    3. admin / moderator -> allow
+    4. Asset id present in a CasePost.attachment_asset_ids AND requester is
        the case owner OR a lawyer who has a CaseBid on that case -> allow
-    4. Asset id present in any DirectMessage.attachment_asset_ids AND
+    5. Asset id present in any DirectMessage.attachment_asset_ids AND
        requester is a participant of that thread (sender/recipient; for case
        discussion threads: case owner or the bid's lawyer) -> allow
-    5. Avatar rows -> allow for authenticated users
     6. Payment screenshots -> allow for assigned booking lawyer
     7. Verification rows -> allow if owner has an approved lawyer profile
     8. else -> 404 (never leak existence)
-    Unauthenticated requests are rejected with 401 via get_current_user dependency.
     """
     try:
         aid = uuid.UUID(str(asset_id))
@@ -448,11 +450,34 @@ def get_asset_file(
             detail="Asset not found",
         )
 
-    # 1. Owner of the asset
+    # 1. Avatars are public profile photos for all users and visitors
+    if asset.kind == "avatar":
+        return _stream_asset(asset)
+
+    # If requester wasn't authenticated via Bearer header, check query param token
+    if requester is None and token:
+        try:
+            payload = decode_access_token(token)
+            email: str = payload.get("sub") or payload.get("email")
+            if email:
+                u = db.query(User).filter(User.email == email).first()
+                if u and u.status != "blocked":
+                    requester = u
+        except Exception:
+            pass
+
+    if not requester:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # 2. Owner of the asset
     if asset.owner_user_id == requester.id:
         return _stream_asset(asset)
 
-    # 2. admin / moderator
+    # 3. admin / moderator
     if requester.role in ("admin", "moderator"):
         return _stream_asset(asset)
 
@@ -523,10 +548,6 @@ def get_asset_file(
                     lp = db.query(LawyerProfile).filter(LawyerProfile.id == bid.lawyer_profile_id).first()
                     if lp and lp.user_id == requester.id:
                         return _stream_asset(asset)
-
-    # 5. Avatar rows are viewable by authenticated users
-    if asset.kind == "avatar":
-        return _stream_asset(asset)
 
     # 6. Payment screenshot rows are viewable by the assigned booking lawyer
     if asset.kind == "payment_screenshot" and requester.role == "lawyer":
