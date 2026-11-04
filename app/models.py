@@ -115,7 +115,15 @@ class Schedule(Base):
 
     # Relationships
     lawyer = relationship("LawyerProfile", back_populates="schedules")
-    booking = relationship("Booking", back_populates="schedule", uselist=False)
+    bookings = relationship("Booking", back_populates="schedule", foreign_keys="Booking.schedule_id")
+
+    @property
+    def booking(self):
+        """Returns the active booking for this schedule slot, or the latest booking."""
+        for b in reversed(self.bookings):
+            if b.status not in ["cancelled", "declined", "expired", "refund_due"]:
+                return b
+        return self.bookings[-1] if self.bookings else None
 
 
 class LawyerWeeklyAvailability(Base):
@@ -136,7 +144,7 @@ class Booking(Base):
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id = Column(Uuid, ForeignKey("users.id"), nullable=False)
     lawyer_id = Column(Uuid, ForeignKey("lawyer_profiles.id"), nullable=False)
-    schedule_id = Column(Uuid, ForeignKey("schedules.id", ondelete="SET NULL"), unique=True, nullable=True)
+    schedule_id = Column(Uuid, ForeignKey("schedules.id", ondelete="SET NULL"), nullable=True)
     # status: pending | awaiting_payment | payment_submitted | confirmed | completion_requested | completed | cancelled | expired | refund_due
     status = Column(String(50), default="pending", nullable=False)
     trx_id = Column(String(255), nullable=True)
@@ -155,7 +163,7 @@ class Booking(Base):
     # Relationships
     user = relationship("User", back_populates="bookings", foreign_keys=[user_id])
     lawyer = relationship("LawyerProfile", back_populates="bookings", foreign_keys=[lawyer_id])
-    schedule = relationship("Schedule", back_populates="booking")
+    schedule = relationship("Schedule", back_populates="bookings")
     screenshot_asset = relationship("ProfileAsset", foreign_keys=[screenshot_asset_id])
     review = relationship("Review", back_populates="booking", uselist=False, cascade="all, delete-orphan")
 

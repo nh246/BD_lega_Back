@@ -33,6 +33,13 @@ app = FastAPI(title="Legal Bridge API")
 
 @app.exception_handler(UnverifiedLawyerException)
 async def unverified_lawyer_exception_handler(request: Request, exc: UnverifiedLawyerException):
+    origin = request.headers.get("origin")
+    headers = {}
+    if origin:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Access-Control-Allow-Headers"] = "*"
+        headers["Access-Control-Allow-Methods"] = "*"
     return JSONResponse(
         status_code=403,
         content={
@@ -40,15 +47,24 @@ async def unverified_lawyer_exception_handler(request: Request, exc: UnverifiedL
             "message": "Please complete verification to access this feature.",
             "detail": "Please complete verification to access this feature.",
         },
+        headers=headers,
     )
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     import traceback
     traceback.print_exc()
+    origin = request.headers.get("origin")
+    headers = {}
+    if origin:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Access-Control-Allow-Headers"] = "*"
+        headers["Access-Control-Allow-Methods"] = "*"
     return JSONResponse(
         status_code=500,
         content={"detail": "Internal server error: " + str(exc)},
+        headers=headers,
     )
 
 allowed_origins = [
@@ -162,6 +178,16 @@ def on_startup():
                     conn.execute(text("ALTER TABLE bookings ADD COLUMN completed_at TIMESTAMP WITH TIME ZONE"))
                 if 'case_brief' not in booking_cols:
                     conn.execute(text("ALTER TABLE bookings ADD COLUMN case_brief TEXT"))
+                # Drop strict unique constraint on schedule_id so cancelled/declined slots can be re-booked cleanly
+                try:
+                    conn.execute(text("ALTER TABLE bookings DROP CONSTRAINT IF EXISTS bookings_schedule_id_key"))
+                    conn.execute(text("""
+                        CREATE UNIQUE INDEX IF NOT EXISTS bookings_active_schedule_idx 
+                        ON bookings (schedule_id) 
+                        WHERE status NOT IN ('cancelled', 'declined', 'expired', 'refund_due')
+                    """))
+                except Exception:
+                    pass
                 conn.commit()
 
         if inspector.has_table('plans'):

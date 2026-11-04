@@ -95,10 +95,21 @@ def create_booking(
                 detail="Schedule slot not found",
             )
         if schedule.is_booked:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Schedule slot is already booked",
+            active_b = (
+                db.query(Booking)
+                .filter(
+                    Booking.schedule_id == schedule.id,
+                    Booking.status.not_in(["cancelled", "declined", "expired", "refund_due"]),
+                )
+                .first()
             )
+            if active_b:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Schedule slot is already booked",
+                )
+            else:
+                schedule.is_booked = False
     elif booking_in.lawyer_id:
         lawyer_uuid = _parse_uuid(booking_in.lawyer_id, "Lawyer profile")
         lawyer = db.query(LawyerProfile).filter(LawyerProfile.id == lawyer_uuid).first()
