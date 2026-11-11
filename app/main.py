@@ -228,7 +228,25 @@ def on_startup():
     except Exception:
         pass
 
-    # 5. One-time schedule slot data fix (ensure end_time != start_time)
+    # 6. Ensure Gemini provider credential exists in database
+    try:
+        from app.core.database import SessionLocal
+        from app.models import ProviderCredential
+        from app.core.config import GEMINI_API_KEY
+        if GEMINI_API_KEY:
+            db = SessionLocal()
+            try:
+                gemini_cred = db.query(ProviderCredential).filter(ProviderCredential.provider == "gemini").first()
+                if not gemini_cred:
+                    db.add(ProviderCredential(provider="gemini", api_key=GEMINI_API_KEY))
+                    db.commit()
+                elif not gemini_cred.api_key:
+                    gemini_cred.api_key = GEMINI_API_KEY
+                    db.commit()
+            finally:
+                db.close()
+    except Exception:
+        pass
     try:
         from app.core.database import SessionLocal
         from app.models import Schedule

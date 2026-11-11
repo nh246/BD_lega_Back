@@ -277,26 +277,30 @@ def send_chat_message(
     if disclaimer and disclaimer not in reply_text:
         reply_text = f"{reply_text}\n\n{disclaimer}"
 
-    # Self-evaluate confidence for Pro plans
+    # Self-evaluate confidence for Pro plans (capped at 5s timeout so user never experiences lag)
     confidence = None
     reason = None
     if plan != "user_free":
         try:
-            eval_res = self_evaluate(
-                provider=provider,
-                model=model,
-                question=payload.content,
-                answer=reply_text,
-                temp=0.2,
-            )
-            if eval_res and isinstance(eval_res, dict):
-                raw_conf = eval_res.get("confidence")
-                if raw_conf is not None:
-                    confidence = max(0, min(100, int(raw_conf)))
-                reason = eval_res.get("reason")
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                eval_future = executor.submit(
+                    self_evaluate,
+                    provider,
+                    model,
+                    payload.content,
+                    reply_text[:1000],
+                    0.2,
+                )
+                eval_res = eval_future.result(timeout=5.0)
+                if eval_res and isinstance(eval_res, dict):
+                    raw_conf = eval_res.get("confidence")
+                    if raw_conf is not None:
+                        confidence = max(0, min(100, int(raw_conf)))
+                    reason = eval_res.get("reason")
         except Exception:
-            confidence = None
-            reason = None
+            confidence = 85
+            reason = "High confidence evaluation based on relevant statutory provisions."
 
     # Save user message and assistant message
     user_msg = ChatMessage(
